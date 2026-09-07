@@ -14,6 +14,7 @@ import (
 	"github.com/cedar2025/xboard-node/internal/controlplane"
 	"github.com/cedar2025/xboard-node/internal/model"
 	"github.com/cedar2025/xboard-node/internal/monitor"
+	"github.com/cedar2025/xboard-node/internal/buildinfo"
 	"github.com/cedar2025/xboard-node/internal/nlog"
 	"github.com/cedar2025/xboard-node/internal/panel"
 	"github.com/cedar2025/xboard-node/internal/service"
@@ -230,8 +231,13 @@ func (o *Orchestrator) restartNode(nodeID int) {
 // SetSelfRestart wires the agent-level restart hook (called by main after
 // orchestrator construction; nil = machine-level control.restart is a no-op).
 // SetHealthyDisarm 注入看门狗解除函数（首次成功心跳上报时调用，幂等）。
+// fn 为 nil 时（看门狗未布防——常规重启），仅用于登记「本次启动版本」到升级状态，
+// 覆盖上一次升级失败时残留的 upgrade_status。
 func (o *Orchestrator) SetHealthyDisarm(fn func()) {
 	o.healthyDisarm = fn
+	if fn != nil {
+		o.upgradeStatus.Store("upgraded to " + buildinfo.Version)
+	}
 }
 
 func (o *Orchestrator) SetSelfRestart(fn func()) {

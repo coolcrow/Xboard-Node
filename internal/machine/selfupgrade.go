@@ -214,7 +214,8 @@ func fileSHA256(path string) (string, error) {
 }
 
 func download(url, dest string) error {
-	client := &http.Client{Timeout: 180 * time.Second}
+	// 慢链路（跨境/回环公网）下载 60MB+ 二进制可能超过 3 分钟；10 分钟上限兼顾慢速与最终失败
+	client := &http.Client{Timeout: 600 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
 		return err

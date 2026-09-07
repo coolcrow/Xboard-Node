@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cedar2025/xboard-node/internal/config"
@@ -59,6 +60,9 @@ type Orchestrator struct {
 	// manager (systemd Restart=always) re-launches it — used by
 	// control.restart without node_id.
 	selfRestart func()
+
+	// upgradeStatus 携带 control.upgrade 的进度/结果，随机器心跳上报面板。
+	upgradeStatus atomic.Value
 }
 
 // New creates a machine orchestrator from the given config.
@@ -303,12 +307,14 @@ func (o *Orchestrator) rediscover(ctx context.Context) {
 
 func (o *Orchestrator) reportMachineStatus() {
 	s := monitor.Collect()
+	upgradeStatus, _ := o.upgradeStatus.Load().(string)
 	if err := o.client.ReportMachineStatus(
 		s.CPU,
 		[2]uint64{s.MemTotal, s.MemUsed},
 		[2]uint64{s.SwapTotal, s.SwapUsed},
 		[2]uint64{s.DiskTotal, s.DiskUsed},
 		s.NetInSpeed, s.NetOutSpeed,
+		upgradeStatus,
 	); err != nil {
 		nlog.Core().Warn("machine status report failed", "error", err)
 	}
@@ -384,6 +390,13 @@ func (o *Orchestrator) onWSEvent(event panel.WSEvent) {
 				o.selfRestart()
 			})
 		}
+		return
+	}
+	if event.Type == panel.WSEventControlUpgrade {
+		nlog.Core().Info("machine received control.upgrade", "version", event.Version)
+		nlog.Go("machine.selfUpgrade", func() {
+			o.selfUpgrade(event.Version, event.SHA256AMD64, event.SHA256ARM64)
+		})
 		return
 	}
 

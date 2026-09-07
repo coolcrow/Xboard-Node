@@ -36,7 +36,7 @@ func TestReportMachineStatus_IncludesAgentVersion(t *testing.T) {
 
 	if err := client.ReportMachineStatus(1.5,
 		[2]uint64{100, 50}, [2]uint64{10, 5}, [2]uint64{1000, 500},
-		1024.0, 2048.0,
+		1024.0, 2048.0, "",
 	); err != nil {
 		t.Fatalf("ReportMachineStatus: %v", err)
 	}

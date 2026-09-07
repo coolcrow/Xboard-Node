@@ -50,6 +50,9 @@ type MachineConfig struct {
 	MachineID int    `yaml:"machine_id"`
 	Token     string `yaml:"token"`
 	TokenEnv  string `yaml:"token_env,omitempty"`
+	// UpgradeDownloadBase 覆盖 agent 自升级的发行源（默认 fork releases）。
+	// 用于自建镜像/内网分发；不影响面板通讯。
+	UpgradeDownloadBase string `yaml:"upgrade_download_base,omitempty"`
 }
 
 // NodeEntry describes a single node in multi-node mode.

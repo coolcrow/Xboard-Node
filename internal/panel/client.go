@@ -344,13 +344,16 @@ func (c *Client) GetMachineNodes() (*MachineNodesResponse, error) {
 
 // ReportMachineStatus sends machine-level load metrics to the panel.
 // netIn/netOut are bytes/sec; negative values mean "unavailable" (first sample).
-func (c *Client) ReportMachineStatus(cpu float64, mem, swap, disk [2]uint64, netIn, netOut float64) error {
+func (c *Client) ReportMachineStatus(cpu float64, mem, swap, disk [2]uint64, netIn, netOut float64, upgradeStatus string) error {
 	payload := map[string]interface{}{
 		"cpu":           cpu,
 		"mem":           map[string]interface{}{"total": mem[0], "used": mem[1]},
 		"swap":          map[string]interface{}{"total": swap[0], "used": swap[1]},
 		"disk":          map[string]interface{}{"total": disk[0], "used": disk[1]},
 		"agent_version": buildinfo.Version,
+	}
+	if upgradeStatus != "" {
+		payload["upgrade_status"] = upgradeStatus
 	}
 	if netIn >= 0 && netOut >= 0 {
 		payload["net"] = map[string]interface{}{"in_speed": netIn, "out_speed": netOut}

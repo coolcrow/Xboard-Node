@@ -22,8 +22,9 @@ const (
 	WSEventSyncDevices   = "sync.devices"   // panel → node: global device state
 	WSEventSyncNodes     = "sync.nodes"     // panel → machine: node list changed
 	WSEventReportDevices = "report.devices" // node → panel: report device snapshot
-	WSEventControlReload = "control.reload" // panel → node/machine: force re-pull config
-	WSEventControlRestart = "control.restart" // panel → node/machine: restart node / agent
+	WSEventControlReload  = "control.reload"  // panel → node/machine: force re-pull config
+	WSEventControlRestart = "control.restart"  // panel → node/machine: restart node / agent
+	WSEventControlUpgrade = "control.upgrade"  // panel → machine: self-upgrade agent binary
 )
 
 // WSEvent is a parsed data event delivered to the service layer.
@@ -37,6 +38,11 @@ type WSEvent struct {
 	// Device sync fields
 	DeviceUsers map[int][]string // userID -> IPs (for sync.devices)
 	NodeID      int
+
+	// control.upgrade fields (machine-level self-upgrade directive)
+	Version     string
+	SHA256AMD64 string
+	SHA256ARM64 string
 
 	// Machine node discovery fields (for sync.nodes)
 	Nodes []MachineNode
@@ -88,6 +94,12 @@ type syncNodesPayload struct {
 
 type controlPayload struct {
 	NodeID int `json:"node_id"` // 0 = machine-wide
+
+	// control.upgrade 携带的升级参数：目标版本 + 按架构的 SHA256（至少一个非空，
+	// agent 只校验自身架构对应的哈希；无固定哈希的升级指令会被拒绝）
+	Version     string `json:"version"`
+	SHA256AMD64 string `json:"sha256_amd64"`
+	SHA256ARM64 string `json:"sha256_arm64"`
 }
 
 // WSClientConfig holds WebSocket client tuning options.
@@ -366,7 +378,7 @@ func (w *WSClient) handleMessage(msg wsMessage) {
 	case WSEventSyncNodes:
 		w.handleDataEvent(msg)
 
-	case WSEventControlReload, WSEventControlRestart:
+	case WSEventControlReload, WSEventControlRestart, WSEventControlUpgrade:
 		w.handleDataEvent(msg)
 
 	default:
@@ -460,13 +472,16 @@ func (w *WSClient) handleDataEvent(msg wsMessage) {
 		}
 		event.Nodes = p.Nodes
 
-	case WSEventControlReload, WSEventControlRestart:
+	case WSEventControlReload, WSEventControlRestart, WSEventControlUpgrade:
 		var p controlPayload
 		if err := decodeData(msg.Data, &p); err != nil {
 			nlog.Core().Warn("ws: cannot decode control payload", "error", err)
 			return
 		}
 		event.NodeID = p.NodeID
+		event.Version = p.Version
+		event.SHA256AMD64 = p.SHA256AMD64
+		event.SHA256ARM64 = p.SHA256ARM64
 	}
 
 	w.onEvent(event)

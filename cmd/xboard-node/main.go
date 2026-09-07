@@ -50,6 +50,11 @@ func main() {
 	}
 	config.InitLogger(instances[0].Log)
 
+	// 升级看门狗：若上次是换核后首启（存在 pending 标记），布防回滚计时；
+	// machine 模式首次成功上报心跳时解除（SetHealthyDisarm 注入）。
+	disarmUpgradeWatchdog := machine.ArmUpgradeWatchdog()
+	defer disarmUpgradeWatchdog()
+
 	// Apply runtime memory tuning before anything else allocates.
 	applyRuntimeConfig(instances[0].Runtime)
 
@@ -58,6 +63,11 @@ func main() {
 
 // runWithReload restarts all node services when the config file changes.
 func runWithReload(initialRoot *config.RootConfig, configPath string) {
+	// 升级看门狗：若上次是换核后首启（存在 pending 标记），布防回滚计时；
+	// machine 模式首次成功上报心跳时解除（SetHealthyDisarm 注入）。
+	disarmUpgradeWatchdog := machine.ArmUpgradeWatchdog()
+	defer disarmUpgradeWatchdog()
+
 	var healthSrv *http.Server
 	var healthPort int
 	startHealth := func(port int) {
@@ -166,6 +176,7 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 				if instanceCfg.IsMachineMode() {
 					nlog.Core().Info("starting machine instance", "instance", instanceCfg.InstanceID, "machine_id", instanceCfg.Machine.MachineID, "panel_url", instanceCfg.Panel.URL)
 					orch := machine.New(instanceCfg)
+					orch.SetHealthyDisarm(disarmUpgradeWatchdog)
 					orch.SetSelfRestart(func() {
 						cancel()
 						nlog.Core().Info("agent self-restarting via supervisor")

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cedar2025/xboard-node/internal/buildinfo"
@@ -24,6 +25,12 @@ import (
 // 任何一步失败都不动在跑的二进制（agent 继续以旧版本服务），状态经
 // upgradeStatus 上报到机器心跳，面板按钮侧可见进度与失败原因。
 func (o *Orchestrator) selfUpgrade(version, shaAMD64, shaARM64 string) {
+	if !o.upgradeMu.TryLock() {
+		o.upgradeStatus.Store("upgrade rejected: another upgrade in progress")
+		nlog.Core().Warn("control.upgrade skipped: upgrade already running", "version", version)
+		return
+	}
+	defer o.upgradeMu.Unlock()
 	o.upgradeStatus.Store("upgrading: " + version)
 	defer func() {
 		if r := recover(); r != nil {
@@ -112,12 +119,68 @@ func (o *Orchestrator) selfUpgrade(version, shaAMD64, shaARM64 string) {
 	nlog.Core().Info("agent binary swapped, stopping kernels and exiting for supervisor",
 		"from", buildinfo.Version, "to", version, "backup", backup)
 
+	// 换核成功后写 pending 标记：新进程启动时据此布防看门狗——若在窗口期内未达到
+	// 健康信号（MarkHealthy），自动恢复备份二进制并退出，systemd 拉回旧版本。
+	// 覆盖“新二进制通过 -v 校验但在真实启动路径上崩溃”的残余风险。
+	if err := writeUpgradeMarker(dir, backup); err != nil {
+		nlog.Core().Warn("upgrade marker write failed; new binary starts without watchdog", "error", err)
+	}
+
 	o.stopAll()
 	if o.selfRestart != nil {
 		o.selfRestart()
 		return
 	}
 	os.Exit(0)
+}
+
+// ─── 启动看门狗（P0 回滚）────────────────────────────────────────────
+
+const upgradeMarkerName = ".xboard-node.upgrade-pending"
+const upgradeWatchdogTimeout = 120 * time.Second
+
+func writeUpgradeMarker(dir, backupPath string) error {
+	return os.WriteFile(filepath.Join(dir, upgradeMarkerName), []byte(backupPath), 0o600)
+}
+
+// ArmUpgradeWatchdog 在进程启动早期调用：若存在换核 pending 标记，布防看门狗。
+// 返回的 disarm 函数在达到健康信号时调用（幂等）。
+func ArmUpgradeWatchdog() (disarm func()) {
+	live, err := os.Executable()
+	if err != nil {
+		return func() {}
+	}
+	dir := filepath.Dir(live)
+	markerPath := filepath.Join(dir, upgradeMarkerName)
+	backup, err := os.ReadFile(markerPath)
+	if err != nil {
+		return func() {} // 无标记 = 常规重启，无需布防
+	}
+	backupPath := strings.TrimSpace(string(backup))
+	nlog.Core().Warn("upgrade watchdog armed: restore backup if not healthy in "+upgradeWatchdogTimeout.String(), "backup", backupPath)
+
+	done := make(chan struct{})
+	var once sync.Once
+	go nlog.Go("upgrade.watchdog", func() {
+		select {
+		case <-done:
+			return
+		case <-time.After(upgradeWatchdogTimeout):
+			nlog.Core().Error("upgrade watchdog fired: new binary not healthy, rolling back", "backup", backupPath)
+			if err := os.Rename(backupPath, live); err != nil {
+				nlog.Core().Error("upgrade watchdog rollback rename failed — manual recovery required", "error", err)
+			}
+			os.Remove(markerPath)
+			os.Exit(1) // systemd Restart=always 拉回旧版本
+		}
+	})
+	return func() {
+		once.Do(func() {
+			close(done)
+			os.Remove(markerPath)
+			nlog.Core().Info("upgrade watchdog disarmed: agent healthy on new version")
+		})
+	}
 }
 
 func shaForArch(amd64, arm64 string) string {

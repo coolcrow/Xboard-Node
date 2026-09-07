@@ -63,6 +63,10 @@ type Orchestrator struct {
 
 	// upgradeStatus 携带 control.upgrade 的进度/结果，随机器心跳上报面板。
 	upgradeStatus atomic.Value
+	// upgradeMu 串行化 selfUpgrade（并发指令直接拒绝）。
+	upgradeMu sync.Mutex
+	// healthyDisarm 由 main 注入：升级看门狗的健康解除函数（首次成功上报心跳时调用）。
+	healthyDisarm func()
 }
 
 // New creates a machine orchestrator from the given config.
@@ -225,6 +229,11 @@ func (o *Orchestrator) restartNode(nodeID int) {
 
 // SetSelfRestart wires the agent-level restart hook (called by main after
 // orchestrator construction; nil = machine-level control.restart is a no-op).
+// SetHealthyDisarm 注入看门狗解除函数（首次成功心跳上报时调用，幂等）。
+func (o *Orchestrator) SetHealthyDisarm(fn func()) {
+	o.healthyDisarm = fn
+}
+
 func (o *Orchestrator) SetSelfRestart(fn func()) {
 	o.mu.Lock()
 	o.selfRestart = fn
@@ -308,6 +317,10 @@ func (o *Orchestrator) rediscover(ctx context.Context) {
 func (o *Orchestrator) reportMachineStatus() {
 	s := monitor.Collect()
 	upgradeStatus, _ := o.upgradeStatus.Load().(string)
+	healthyDisarm := o.healthyDisarm
+	if healthyDisarm != nil {
+		defer func() { healthyDisarm() }()
+	}
 	if err := o.client.ReportMachineStatus(
 		s.CPU,
 		[2]uint64{s.MemTotal, s.MemUsed},

@@ -50,11 +50,6 @@ func main() {
 	}
 	config.InitLogger(instances[0].Log)
 
-	// 升级看门狗：若上次是换核后首启（存在 pending 标记），布防回滚计时；
-	// machine 模式首次成功上报心跳时解除（SetHealthyDisarm 注入）。
-	disarmUpgradeWatchdog := machine.ArmUpgradeWatchdog()
-	defer disarmUpgradeWatchdog()
-
 	// Apply runtime memory tuning before anything else allocates.
 	applyRuntimeConfig(instances[0].Runtime)
 

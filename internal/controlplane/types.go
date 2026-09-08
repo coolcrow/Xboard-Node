@@ -49,14 +49,18 @@ type Snapshot struct {
 }
 
 type ReportPayload struct {
-	Traffic map[int][2]int64
-	Alive   map[int][]string
-	Online  map[int]int
-	CPU     float64
-	Mem     [2]uint64
-	Swap    [2]uint64
-	Disk    [2]uint64
-	Metrics map[string]interface{}
+	// ReportID 单调递增（每次成功上报 +1，失败重发复用同值）。
+	// 面板据此去重：report_id <= 已处理序号的报文按重放丢弃，
+	// 消除「面板已入库但响应丢失 → agent 恢复重发 → 用户流量双计」
+	ReportID uint64
+	Traffic  map[int][2]int64
+	Alive    map[int][]string
+	Online   map[int]int
+	CPU      float64
+	Mem      [2]uint64
+	Swap     [2]uint64
+	Disk     [2]uint64
+	Metrics  map[string]interface{}
 }
 
 type PushClient interface {

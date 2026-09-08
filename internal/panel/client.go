@@ -107,11 +107,14 @@ func (c *Client) Handshake() (*HandshakeResponse, error) {
 // The optional metrics map allows the node to submit richer telemetry
 // (active connections, per-core CPU, GC stats, limiter hits, etc.)
 // without changing the core schema of status.
-func (c *Client) Report(traffic map[int][2]int64, alive map[int][]string, online map[int]int,
+func (c *Client) Report(reportID uint64, traffic map[int][2]int64, alive map[int][]string, online map[int]int,
 	cpu float64, mem, swap, disk [2]uint64,
 	metrics map[string]interface{},
 ) error {
 	payload := make(map[string]interface{})
+	if reportID > 0 {
+		payload["report_id"] = reportID
+	}
 
 	if len(traffic) > 0 {
 		t := trafficMapPool.Get().(map[string][2]int64)

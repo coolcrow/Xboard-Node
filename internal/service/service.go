@@ -60,8 +60,10 @@ type Service struct {
 	pushBackoff    apiBackoff // backoff for panel push failures
 
 	// pushActive prevents overlapping push/pull goroutines.
-	pushActive      atomic.Bool
-	pullActive      atomic.Bool
+	pushActive atomic.Bool
+	pullActive atomic.Bool
+	// reportSeq 单调上报序号：成功 +1；失败保持（重发复用同 ID 供面板去重）
+	reportSeq       atomic.Uint64
 	lastReconcileAt time.Time
 	// pullResults delivers async pullViaAPI results back to the main goroutine.
 	pullResults chan pullResult
@@ -147,7 +149,7 @@ func NewWithControlPlane(cfg *config.Config, cp controlplane.ControlPlane) *Serv
 	return newService(cfg, cp)
 }
 
-func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
+func newService(cfg *config.Config, cp controlplane.ControlPlane) (svc *Service) {
 	certMgr := cert.NewManager(cfg.Cert)
 
 	var k kernel.Kernel
@@ -164,7 +166,7 @@ func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 	l := limiter.New()
 	st := limiter.NewSpeedTracker(l)
 
-	return &Service{
+	svc = &Service{
 		cfg:          cfg,
 		source:       cp,
 		sink:         cp,
@@ -178,6 +180,9 @@ func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 		pullResults:  make(chan pullResult, 1),
 		certResults:  make(chan certReconfOutcome, 4),
 	}
+	// 起始值取启动时刻纳秒：跨进程重启仍单调，面板侧 <= 判定安全
+	svc.reportSeq.Store(uint64(time.Now().UnixNano()))
+	return
 }
 
 func (s *Service) Run(ctx context.Context) error {
@@ -1034,9 +1039,10 @@ func (s *Service) pushReportAsync() {
 	metrics := s.buildMetrics(status)
 	metrics["kernel_status"] = s.kernel.IsRunning()
 
+	rid := s.reportSeq.Load()
 	nlog.Go("service.pushReport", func() {
 		defer s.pushActive.Store(false)
-		if err := s.sink.Report(controlplane.ReportPayload{Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
+		if err := s.sink.Report(controlplane.ReportPayload{ReportID: rid, Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
 			nlog.Core().Warn("failed to push report", "error", err)
 			if len(traffic) > 0 {
 				s.tracker.RestoreTraffic(traffic)
@@ -1045,8 +1051,9 @@ func (s *Service) pushReportAsync() {
 				s.tracker.RestoreAliveIPs(aliveIPs)
 			}
 			s.pushBackoff.onFailure()
-			return
+			return // rid 保持不变：重发复用同 ID，面板据 report_id 去重
 		}
+		s.reportSeq.Add(1)
 		s.pushBackoff.onSuccess()
 		nlog.ReportPushed(len(traffic), len(online))
 	})
@@ -1064,7 +1071,7 @@ func (s *Service) pushReportSync() {
 	metrics := s.buildMetrics(status)
 	metrics["kernel_status"] = s.kernel.IsRunning()
 
-	if err := s.sink.Report(controlplane.ReportPayload{Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
+	if err := s.sink.Report(controlplane.ReportPayload{ReportID: s.reportSeq.Load(), Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
 		nlog.Core().Warn("failed to push final report", "error", err)
 	}
 }

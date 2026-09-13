@@ -788,6 +788,17 @@ func (s *Service) restoreUserState(users []model.UserSpec, hash string) {
 // startKernel starts (or restarts) the kernel with the given config/users and
 // records the successfully applied state. Returns false on error.
 func (s *Service) startKernel(nc *model.NodeSpec, users []model.UserSpec) bool {
+	// TLS 证书就绪等待：证书管理器异步加载持久化证书，冷启动时内核可能先于
+	// 证书读取就绪启动（Hysteria 等协议要求启动即有证书）——轮询等待最长 2s
+	if !s.cert.TLSCert().HasCert() {
+		for i := 0; i < 20; i++ {
+			time.Sleep(100 * time.Millisecond)
+			if s.cert.TLSCert().HasCert() {
+				nlog.Core().Info("cert ready after wait, retrying kernel start", "waited_ms", (i+1)*100)
+				break
+			}
+		}
+	}
 	if err := s.kernel.Start(nc, users, s.cert.TLSCert()); err != nil {
 		nlog.Core().Error("failed to start kernel", "error", err)
 		return false

@@ -67,4 +67,5 @@ Legacy single-panel config is fully compatible. Appending bindings auto-migrates
 
 ## License
 
-MPL-2.0.
+- 本仓库源码：MPL-2.0（延续上游 [cedar2025/Xboard-Node](https://github.com/cedar2025/Xboard-Node) 的许可声明）
+- 发布二进制：静态链接 [sing-box](https://github.com/SagerNet/sing-box)（GPL-3.0，本组织镜像 [coolcrow/sing-box](https://github.com/coolcrow/sing-box)），故二进制分发适用 GPL-3.0 条款；对应源码均在本仓库与上述镜像公开，满足源码可得性

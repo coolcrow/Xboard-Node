@@ -28,6 +28,21 @@ var (
 	buildTime = buildinfo.BuildTime
 )
 
+// isAuthFailure 识别面板鉴权拒绝：HTTP 401/403 或面板显式语义。
+// token 轮换/机器停用是运维常态，此类失败重试不可能自愈。
+func isAuthFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{"status 401", "status 403", "machine not found", "invalid token", "auth failed"} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func main() {
 	configPath := flag.String("c", "config.yml", "config file path")
 	showVersion := flag.Bool("v", false, "show version")
@@ -240,6 +255,14 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 		if newRoot == nil {
 			close(errCh)
 			if err := <-errCh; err != nil {
+				// 鉴权类失败（token 失效/机器被禁用）长退避后再退出：
+				// systemd Restart=always 的 5 秒循环会持续冲击面板并刷爆
+				// journal（评审 M-2）。网络类错误保持快速重试。
+				if isAuthFailure(err) {
+					backoff := 5*time.Minute + time.Duration(time.Now().UnixNano()%int64(90*time.Second))
+					nlog.Core().Warn("auth failure, backing off before exit", "backoff", backoff.String(), "error", err)
+					time.Sleep(backoff)
+				}
 				os.Exit(1)
 			}
 			nlog.Core().Info("stopped")

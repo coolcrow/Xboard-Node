@@ -215,6 +215,43 @@ func (w *WSClient) Run(ctx context.Context) {
 	}
 }
 
+
+// debugPayload 在 DEBUG 日志中脱敏凭据字段：sync.config 下发载荷可能携带
+// cert_config.key_content（TLS 私钥 PEM）等，journal 持久化不可明文留存（评审 M-4）。
+func debugPayload(data []byte) string {
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		return fmt.Sprintf("<%d bytes non-json>", len(data))
+	}
+	redactMap(m)
+	out, err := json.Marshal(m)
+	if err != nil {
+		return fmt.Sprintf("<%d bytes redacted- marshal failed>", len(data))
+	}
+	return string(out)
+}
+
+func redactMap(m map[string]any) {
+	for k, v := range m {
+		switch tv := v.(type) {
+		case map[string]any:
+			redactMap(tv)
+		case []any:
+			for _, item := range tv {
+				if sub, ok := item.(map[string]any); ok {
+					redactMap(sub)
+				}
+			}
+		}
+		lk := strings.ToLower(k)
+		if strings.Contains(lk, "key_content") || strings.Contains(lk, "private") ||
+			strings.Contains(lk, "password") || strings.Contains(lk, "token") ||
+			strings.Contains(lk, "secret") {
+			m[k] = "[REDACTED]"
+		}
+	}
+}
+
 func (w *WSClient) connect(ctx context.Context) error {
 	u, err := url.Parse(w.wsURL)
 	if err != nil {
@@ -268,7 +305,7 @@ func (w *WSClient) connect(ctx context.Context) error {
 		return fmt.Errorf("read auth response: %w", err)
 	}
 	_ = conn.SetReadDeadline(time.Time{})
-	nlog.Core().Debug("ws recv", "event", firstMsg.Event, "data", string(firstMsg.Data))
+	nlog.Core().Debug("ws recv", "event", firstMsg.Event, "data", debugPayload(firstMsg.Data))
 
 	if firstMsg.Event == "error" {
 		var errData struct {
@@ -319,7 +356,7 @@ func (w *WSClient) connect(ctx context.Context) error {
 				return
 			}
 			_ = conn.SetReadDeadline(time.Now().Add(readIdleTimeout))
-			nlog.Core().Debug("ws recv", "event", msg.Event, "data", string(msg.Data))
+			nlog.Core().Debug("ws recv", "event", msg.Event, "data", debugPayload(msg.Data))
 			w.handleMessage(msg)
 			if msg.Event == "ping" {
 				select {
@@ -361,7 +398,7 @@ func (w *WSClient) connect(ctx context.Context) error {
 
 		case msg := <-writeCh:
 			// Perform the actual network write asynchronously in this loop.
-			nlog.Core().Debug("ws send", "event", msg.Event, "data", string(msg.Data))
+			nlog.Core().Debug("ws send", "event", msg.Event, "data", debugPayload(msg.Data))
 			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := conn.WriteJSON(msg); err != nil {
 				return fmt.Errorf("write: %w", err)

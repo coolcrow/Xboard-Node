@@ -122,6 +122,9 @@ jobs:
         with:
           merge-multiple: true
           path: dist
+      - name: Stage license notices
+        run: |
+          cp LICENSE-GPLv3.txt THIRD-PARTY-NOTICES.md dist/
       - name: Generate SHA256SUMS
         run: |
           cd dist && sha256sum xboard-node-linux-* xbctl-linux-* > SHA256SUMS
@@ -136,6 +139,8 @@ jobs:
             dist/xbctl-linux-amd64
             dist/xbctl-linux-arm64
             dist/SHA256SUMS
+            dist/LICENSE-GPLv3.txt
+            dist/THIRD-PARTY-NOTICES.md
 
   mirror:
     name: Mirror release to panel agent-dist

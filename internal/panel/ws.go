@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -219,6 +220,16 @@ func (w *WSClient) connect(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("parse ws url: %w", err)
 	}
+	// 明文 ws:// 仅允许环回（本机混部面板提速场景）。面板下发的 ws:// 外网地址
+	// 意味着 machine token 与控制指令（含升级 URL+SHA）全程明文，MITM 即节点 RCE，
+	// 直接拒绝（安全评审 H-1）。
+	if u.Scheme == "ws" {
+		host := u.Hostname()
+		if host != "localhost" && !strings.HasSuffix(host, ".localhost") &&
+			host != "127.0.0.1" && host != "::1" {
+			return fmt.Errorf("refusing plaintext ws:// panel URL %q: machine token would be sent in cleartext (require wss://)", w.wsURL)
+		}
+	}
 	q := u.Query()
 	q.Set("token", w.token)
 	if w.cfg.MachineID > 0 {
@@ -247,11 +258,16 @@ func (w *WSClient) connect(ctx context.Context) error {
 
 	conn.SetReadLimit(10 << 20) // 10MB max message size
 
+	// 首条消息（auth 响应）必须有读超时：挂起/恶意的面板会让本协程永久阻塞，
+	// WS 静默失联直到进程重启（评审 M-6）。认证完成后再由 readPump 接管超时。
+	_ = conn.SetReadDeadline(time.Now().Add(w.cfg.HandshakeTimeout))
+
 	// Read first message — expect auth.success or error
 	var firstMsg wsMessage
 	if err := conn.ReadJSON(&firstMsg); err != nil {
 		return fmt.Errorf("read auth response: %w", err)
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 	nlog.Core().Debug("ws recv", "event", firstMsg.Event, "data", string(firstMsg.Data))
 
 	if firstMsg.Event == "error" {

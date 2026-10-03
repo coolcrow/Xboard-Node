@@ -14,10 +14,16 @@ BACKUP_DIR="${INSTALL_ROOT}/backups"
 INSTALL_META="${INSTALL_ROOT}/install-meta.json"
 CONFIG_FILE="${INSTALL_ROOT}/config.yml"
 CREDENTIALS_FILE="${INSTALL_ROOT}/credentials.env"
-BINARY_PATH="/usr/local/bin/xboard-node"
+# 二进制住在 INSTALL_ROOT 内：systemd 沙箱（ProtectSystem=strict + ReadWritePaths）
+# 之下 /usr 为只读，control.upgrade 的原子换核必须发生在可写路径。
+# /usr/local/bin 下保留符号链接以兼容旧脚本与肌肉记忆。
+INSTALL_BIN_DIR="${INSTALL_ROOT}/bin"
+BINARY_PATH="${INSTALL_BIN_DIR}/xboard-node"
+LEGACY_BINARY_PATH="/usr/local/bin/xboard-node"
 SERVICE_NAME="xboard-node.service"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
-CLI_PATH="/usr/local/bin/xbctl"
+CLI_PATH="${INSTALL_BIN_DIR}/xbctl"
+LEGACY_CLI_PATH="/usr/local/bin/xbctl"
 INSTALLER_COPY_PATH="${INSTALL_ROOT}/install.sh"
 CLI_BINARY_SOURCE=""
 DEFAULT_HEALTH_PORT=65530
@@ -395,8 +401,21 @@ install_dependencies() {
 }
 
 ensure_dirs() {
-    mkdir -p "$INSTALL_ROOT" "$BACKUP_DIR"
+    mkdir -p "$INSTALL_ROOT" "$BACKUP_DIR" "$INSTALL_BIN_DIR"
     chmod 700 "$INSTALL_ROOT"
+}
+
+migrate_legacy_binaries() {
+    # 旧部署二进制在 /usr/local/bin；迁入 INSTALL_ROOT 并留符号链接，
+    # 使旧 ExecStart=/usr/local/bin/xboard-node 的 unit 在 daemon-reload 前仍可启动。
+    if [ -e "$LEGACY_BINARY_PATH" ] && [ ! -e "$BINARY_PATH" ]; then
+        mv "$LEGACY_BINARY_PATH" "$BINARY_PATH"
+    fi
+    if [ -e "$LEGACY_CLI_PATH" ] && [ ! -e "$CLI_PATH" ]; then
+        mv "$LEGACY_CLI_PATH" "$CLI_PATH"
+    fi
+    ln -sfn "$BINARY_PATH" "$LEGACY_BINARY_PATH" 2>/dev/null || true
+    ln -sfn "$CLI_PATH" "$LEGACY_CLI_PATH" 2>/dev/null || true
 }
 
 validate_positive_int() {
@@ -489,6 +508,40 @@ resolve_download_url() {
     fi
 }
 
+verify_sha256() {
+    # 供应链完整性（安全评审 H-4）：release 附带 SHA256SUMS，安装器必须校验。
+    # 显式版本缺失 SUMS 或校验不过 → 拒装；latest 别名允许 SUMS 未同步时告警放行。
+    local artifact="$1" staged="$2"
+    local sums="${staged}.SHA256SUMS"
+    local version_dir
+    if [ "$RELEASE_VERSION" = "latest" ]; then
+        version_dir="latest/download"
+    else
+        version_dir="download/${RELEASE_VERSION}"
+    fi
+    if ! curl -fsSL "${DEFAULT_DOWNLOAD_BASE}/${version_dir}/SHA256SUMS" -o "$sums"; then
+        if [ "$RELEASE_VERSION" = "latest" ]; then
+            log_warn "SHA256SUMS unavailable for 'latest' (mirror sync lag?), skipping integrity check"
+            return 0
+        fi
+        log_error "SHA256SUMS missing for ${RELEASE_VERSION}; refusing to install unverified binary"
+        exit 1
+    fi
+    local expected
+    expected=$(grep " ${artifact}\$" "$sums" | awk '{print $1}')
+    if [ -z "$expected" ]; then
+        log_error "${artifact} not found in SHA256SUMS; refusing to install"
+        exit 1
+    fi
+    local actual
+    actual=$(sha256sum "$staged" | awk '{print $1}')
+    if [ "$actual" != "$expected" ]; then
+        log_error "SHA256 mismatch for ${artifact}: expected ${expected}, got ${actual}"
+        exit 1
+    fi
+    log_step "SHA256 verified for ${artifact}"
+}
+
 stage_binary() {
     local staged="$TMP_DIR/xboard-node"
     local local_src
@@ -503,6 +556,7 @@ stage_binary() {
             log_error "Failed to download binary from ${DOWNLOAD_URL}"
             exit 1
         fi
+        verify_sha256 "xboard-node-linux-${ARCH}" "$staged"
     fi
     chmod +x "$staged"
     if ! "$staged" -v >/dev/null 2>&1; then
@@ -535,6 +589,7 @@ stage_xbctl() {
             log_error "Failed to download xbctl from ${DOWNLOAD_URL}"
             exit 1
         fi
+        verify_sha256 "xbctl-linux-${ARCH}" "$staged"
     fi
     chmod +x "$staged"
     if ! "$staged" version > /dev/null 2>&1; then
@@ -617,6 +672,18 @@ ReadWritePaths=${INSTALL_ROOT}
 
 StandardOutput=journal
 StandardError=journal
+# 沙箱：整树只读，仅 INSTALL_ROOT 可写（二进制位于其内 → control.upgrade 原子换核可用）
+ProtectSystem=strict
+ReadWritePaths=${INSTALL_ROOT}
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# 代理内核所需：443 绑定 / tun 设备与路由（NET_ADMIN）/ 原始套接字
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
 
 [Install]
 WantedBy=multi-user.target
@@ -718,6 +785,7 @@ perform_install() {
     require_reconfigure_confirmation
     TMP_DIR=$(mktemp -d)
     ensure_dirs
+    migrate_legacy_binaries
     stage_binary
     stage_xbctl
     render_config
@@ -745,6 +813,7 @@ perform_upgrade() {
     fi
     TMP_DIR=$(mktemp -d)
     ensure_dirs
+    migrate_legacy_binaries
     stage_binary
     stage_xbctl
     render_service

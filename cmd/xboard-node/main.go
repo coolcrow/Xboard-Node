@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"strconv"
 	"net"
 	"net/http"
 	"os"
@@ -62,9 +63,15 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 		if port <= 0 {
 			return
 		}
-		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		// 默认仅环回监听：/healthz 无鉴权，公网暴露即信息泄露（评审 M-1）。
+		// 需要外部探测（如独立监控机）时显式设置 XB_HEALTH_BIND=0.0.0.0。
+		bind := os.Getenv("XB_HEALTH_BIND")
+		if bind == "" {
+			bind = "127.0.0.1"
+		}
+		ln, err := net.Listen("tcp", net.JoinHostPort(bind, strconv.Itoa(port)))
 		if err != nil {
-			nlog.Core().Error("failed to start health check listener", "port", port, "error", err)
+			nlog.Core().Error("failed to start health check listener", "addr", net.JoinHostPort(bind, strconv.Itoa(port)), "error", err)
 			os.Exit(1)
 		}
 		mux := http.NewServeMux()
@@ -76,7 +83,7 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 		healthSrv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 		healthPort = port
 		go func() {
-			nlog.Core().Debug(fmt.Sprintf("health check listening on :%d", port))
+			nlog.Core().Debug(fmt.Sprintf("health check listening on %s:%d", bind, port))
 			if err := healthSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
 				nlog.Core().Warn("health check server stopped", "error", err)
 			}

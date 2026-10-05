@@ -509,8 +509,9 @@ resolve_download_url() {
     local base="${DOWNLOAD_MIRROR:-$DEFAULT_DOWNLOAD_BASE}"
     if [ -n "$DOWNLOAD_MIRROR" ]; then
         # mirror 布局: <mirror>/download/<version>/<artifact>（面板 agent-dist 同构）
+        # 注意：面板 agent-dist 不维护 latest 路径——latest 时回退 GitHub
         if [ "$RELEASE_VERSION" = "latest" ]; then
-            DOWNLOAD_URL="${base}/latest/download/${artifact}"
+            DOWNLOAD_URL="${DEFAULT_DOWNLOAD_BASE}/latest/download/${artifact}"
         else
             DOWNLOAD_URL="${base}/download/${RELEASE_VERSION}/${artifact}"
         fi
@@ -532,13 +533,17 @@ verify_sha256() {
     else
         version_dir="download/${RELEASE_VERSION}"
     fi
-    if ! curl -fsSL "${DEFAULT_DOWNLOAD_BASE}/${version_dir}/SHA256SUMS" -o "$sums"; then
-        if [ "$RELEASE_VERSION" = "latest" ]; then
-            log_warn "SHA256SUMS unavailable for 'latest' (mirror sync lag?), skipping integrity check"
-            return 0
+    # 优先从镜像取（GitHub 不通时 mirror 仍可验证）；镜像也没有才回退
+    local sums_base="${DOWNLOAD_MIRROR:-$DEFAULT_DOWNLOAD_BASE}"
+    if ! curl -fsSL "${sums_base}/${version_dir}/SHA256SUMS" -o "$sums" 2>/dev/null; then
+        if ! curl -fsSL "${DEFAULT_DOWNLOAD_BASE}/${version_dir}/SHA256SUMS" -o "$sums" 2>/dev/null; then
+            if [ "$RELEASE_VERSION" = "latest" ]; then
+                log_warn "SHA256SUMS unavailable for 'latest' (mirror + GitHub both unreachable?), skipping integrity check"
+                return 0
+            fi
+            log_error "SHA256SUMS missing for ${RELEASE_VERSION} (mirror + GitHub both unreachable); refusing to install unverified binary"
+            exit 1
         fi
-        log_error "SHA256SUMS missing for ${RELEASE_VERSION}; refusing to install unverified binary"
-        exit 1
     fi
     local expected
     expected=$(grep " ${artifact}\$" "$sums" | awk '{print $1}')

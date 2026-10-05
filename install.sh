@@ -34,6 +34,7 @@ DEFAULT_RELEASE_VERSION="latest"
 DEFAULT_LOG_LEVEL="info"
 DEFAULT_KERNEL_LOG_LEVEL="warn"
 DEFAULT_DOWNLOAD_BASE="https://github.com/coolcrow/Xboard-Node/releases"
+DOWNLOAD_MIRROR=""  # --mirror <URL>：面板 agent-dist 或代理镜像（替代 GitHub releases）
 
 ACTION="${DEFAULT_ACTION}"
 MODE=""
@@ -261,6 +262,10 @@ parse_args() {
                 ;;
             --health-port)
                 HEALTH_PORT="$2"
+                shift 2
+                ;;
+            --mirror)
+                DOWNLOAD_MIRROR="$2"
                 shift 2
                 ;;
             --gomemlimit)
@@ -501,7 +506,15 @@ select_binary_source() {
 
 resolve_download_url() {
     local artifact="$1"
-    if [ "$RELEASE_VERSION" = "latest" ]; then
+    local base="${DOWNLOAD_MIRROR:-$DEFAULT_DOWNLOAD_BASE}"
+    if [ -n "$DOWNLOAD_MIRROR" ]; then
+        # mirror 布局: <mirror>/download/<version>/<artifact>（面板 agent-dist 同构）
+        if [ "$RELEASE_VERSION" = "latest" ]; then
+            DOWNLOAD_URL="${base}/latest/download/${artifact}"
+        else
+            DOWNLOAD_URL="${base}/download/${RELEASE_VERSION}/${artifact}"
+        fi
+    elif [ "$RELEASE_VERSION" = "latest" ]; then
         DOWNLOAD_URL="${DEFAULT_DOWNLOAD_BASE}/latest/download/${artifact}"
     else
         DOWNLOAD_URL="${DEFAULT_DOWNLOAD_BASE}/download/${RELEASE_VERSION}/${artifact}"

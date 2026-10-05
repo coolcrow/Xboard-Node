@@ -42,6 +42,11 @@ curl -fsSL https://raw.githubusercontent.com/coolcrow/Xboard-Node/main/install.s
 curl -fsSL https://raw.githubusercontent.com/coolcrow/Xboard-Node/main/install.sh | \
   sudo bash -s -- --mode machine --panel https://panel.example.com --token TOKEN --machine-id 1
 
+# 中国大陆节点（agent-dist 镜像加速 + 指定版本）
+curl -fsSL https://raw.githubusercontent.com/coolcrow/Xboard-Node/main/install.sh | \
+  sudo bash -s -- --mode machine --panel https://panel.example.com --token TOKEN --machine-id 1 \
+       --mirror https://panel.example.com/agent-dist --version v1.0.6
+
 ## xbctl
 
 Run `xbctl` after installation for help. Common commands:

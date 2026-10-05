@@ -824,6 +824,8 @@ perform_install() {
 
 perform_upgrade() {
     detect_current_state
+    # 从现有配置加载 health_port（否则升级时用默认端口探测 → 必失败 → 错误回滚）
+    load_health_port_from_config "$CONFIG_FILE"
     if [ "$CURRENT_STATE" = "fresh" ]; then
         log_warn "No existing install found; falling back to install"
         perform_install

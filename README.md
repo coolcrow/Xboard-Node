@@ -47,6 +47,23 @@ curl -fsSL https://raw.githubusercontent.com/coolcrow/Xboard-Node/main/install.s
   sudo bash -s -- --mode machine --panel https://panel.example.com --token TOKEN --machine-id 1 \
        --mirror https://panel.example.com/agent-dist --version v1.0.6
 
+## Relay / Landing Setup (Optional)
+
+For relay-protected landing architecture (users connect to a relay entry, landing IPs stay hidden from GFW):
+
+```bash
+# On relay server (e.g., HK with China-optimized routing)
+./tools-relay/relay-setup.sh --landing <landing_ip> --ports 443,18443
+
+# Single-protocol (when TCP 443 is occupied by nginx on the relay box)
+./tools-relay/relay-setup.sh --landing <landing_ip> --ports 443/udp,18443/tcp
+
+# Switch landing (10 seconds, users unaffected)
+./tools-relay/switch-landing.sh <new_landing_ip>
+```
+
+See [tools-relay/README.md](./tools-relay/README.md) for architecture, bandwidth planning, and troubleshooting.
+
 ## xbctl
 
 Run `xbctl` after installation for help. Common commands:

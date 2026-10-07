@@ -678,30 +678,23 @@ Restart=always
 RestartSec=5
 LimitNOFILE=1048576
 NoNewPrivileges=true
-
-# 能力收紧：仅保留网络绑定/网络管理/原始套接字（TUN、SO_MARK、低端口与 ip rule 所需），
-# 移除 SYS_ADMIN/DAC_OVERRIDE 等其余 root 能力；配合文件系统沙箱限制写入面
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
-AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-ReadWritePaths=${INSTALL_ROOT} /etc/systemd/system
-
 StandardOutput=journal
 StandardError=journal
-# 沙箱：整树只读，仅 INSTALL_ROOT 可写（二进制位于其内 → control.upgrade 原子换核可用）
-ProtectSystem=strict
+
+# 沙箱：整树只读；可写面 = INSTALL_ROOT（二进制位于其内 → control.upgrade 原子换核）
+#          + /etc/systemd/system（relay 包安装 realm-relay@.service 模板需要）
 ReadWritePaths=${INSTALL_ROOT} /etc/systemd/system
+ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
-RestrictSUIDSGID=true
 LockPersonality=true
-# 代理内核所需：443 绑定 / tun 设备与路由（NET_ADMIN）/ 原始套接字
+# 能力收紧：仅保留网络绑定/网络管理/原始套接字（TUN、SO_MARK、低端口与 ip rule 所需），
+# 移除 SYS_ADMIN/DAC_OVERRIDE 等其余 root 能力；配合文件系统沙箱限制写入面
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
 
 [Install]
 WantedBy=multi-user.target
@@ -875,8 +868,14 @@ perform_uninstall() {
     rm -f "$BINARY_PATH"
     rm -f "$CLI_PATH"
     rm -f /usr/bin/xbctl 2>/dev/null || true
+    # relay 实例二进制/配置住在 INSTALL_ROOT 内——purge 前必须停用，否则留下 broken 单元
+    for i in dual tcp udp; do
+        systemctl stop "realm-relay@${i}" >/dev/null 2>&1 || true
+        systemctl disable "realm-relay@${i}" >/dev/null 2>&1 || true
+    done
     if [ "$PURGE" -eq 1 ]; then
         rm -rf "$INSTALL_ROOT"
+        rm -f /etc/systemd/system/realm-relay@.service
         log_info "Removed ${INSTALL_ROOT}"
     else
         rm -f "$INSTALL_META"

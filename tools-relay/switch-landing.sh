@@ -8,7 +8,7 @@
 set -euo pipefail
 
 NEW="${1:?用法: $0 <新落地IP>}"
-ETC_DIR="/etc/realm"
+ETC_DIR="/etc/xboard-node/realm"  # 与 agent/relay-setup.sh 同路径
 
 ls "${ETC_DIR}"/*.toml >/dev/null 2>&1 || { echo "ERROR: 无 realm 配置，先跑 relay-setup.sh"; exit 1; }
 
@@ -44,3 +44,4 @@ echo "  全部实例已重启 ✓（备份: ${BAK}）"
 
 echo "=== [3/3] 完成 ==="
 echo "用户侧无需任何动作（订阅入口未变）。旧落地 ${OLD} 保留观察 24h 后再处置。"
+echo "接入 agent 后建议改用面板 [保存并下发] 切换落地（自动映射内核端口）。"

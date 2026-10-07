@@ -17,6 +17,7 @@ import (
 	"github.com/cedar2025/xboard-node/internal/buildinfo"
 	"github.com/cedar2025/xboard-node/internal/nlog"
 	"github.com/cedar2025/xboard-node/internal/panel"
+	"github.com/cedar2025/xboard-node/internal/relay"
 	"github.com/cedar2025/xboard-node/internal/service"
 )
 
@@ -97,6 +98,11 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.applyIntervals(nodesResp.BaseConfig)
 	nlog.Core().Info(fmt.Sprintf("machine %d: discovered %d nodes",
 		o.cfg.Machine.MachineID, len(nodesResp.Nodes)))
+
+	// relay 基线：断线期间面板可能已改配置，启动即对齐
+	if nodesResp.Relay != nil {
+		nlog.Go("machine.relayBaseline", func() { o.applyRelay(*nodesResp.Relay) })
+	}
 
 	// Start machine-level WS as early as possible so sync.nodes can reach an
 	// empty machine before the first node is attached.
@@ -295,6 +301,10 @@ func (o *Orchestrator) rediscover(ctx context.Context) {
 		return
 	}
 
+	if nodesResp.Relay != nil {
+		o.applyRelay(*nodesResp.Relay) // 幂等：配置未变时 no-op
+	}
+
 	wanted := make(map[int]panel.MachineNode, len(nodesResp.Nodes))
 	for _, n := range nodesResp.Nodes {
 		wanted[n.ID] = n
@@ -318,6 +328,21 @@ func (o *Orchestrator) rediscover(ctx context.Context) {
 	}
 }
 
+// ─── Relay (realm) management ────────────────────────────────────────────
+
+// applyRelay 将面板 relay spec 对齐到本机 realm（幂等；错误只记录不影响节点服务）。
+func (o *Orchestrator) applyRelay(spec relay.Spec) {
+	if !spec.Enabled {
+		// 未启用也可能是"从未配置"——Collect 会如实上报，无需日志刷屏
+		nlog.Core().Debug("relay: spec disabled, ensuring teardown")
+	} else {
+		nlog.Core().Info("relay: applying spec", "landing", spec.LandingHost, "ports", spec.Ports)
+	}
+	if err := relay.Apply(spec); err != nil {
+		nlog.Core().Error("relay: apply failed", "error", err)
+	}
+}
+
 // ─── Machine status reporting ────────────────────────────────────────────
 
 func (o *Orchestrator) reportMachineStatus() {
@@ -334,6 +359,7 @@ func (o *Orchestrator) reportMachineStatus() {
 		[2]uint64{s.DiskTotal, s.DiskUsed},
 		s.NetInSpeed, s.NetOutSpeed,
 		upgradeStatus,
+		relay.Collect(),
 	); err != nil {
 		nlog.Core().Warn("machine status report failed", "error", err)
 	}
@@ -384,6 +410,14 @@ func (o *Orchestrator) onWSEvent(event panel.WSEvent) {
 	if event.Type == panel.WSEventSyncNodes {
 		nlog.Core().Info("machine received sync.nodes, triggering immediate rediscovery")
 		nlog.Go("machine.rediscover", func() { o.rediscover(o.runCtx) })
+		return
+	}
+
+	// sync.relay: realm 转发配置变更（即时应用）
+	if event.Type == panel.WSEventSyncRelay && event.Relay != nil {
+		nlog.Core().Info("machine received sync.relay", "enabled", event.Relay.Enabled,
+			"landing", event.Relay.LandingHost, "ports", event.Relay.Ports)
+		nlog.Go("machine.relayApply", func() { o.applyRelay(*event.Relay) })
 		return
 	}
 

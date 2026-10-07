@@ -686,13 +686,13 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=${INSTALL_ROOT}
+ReadWritePaths=${INSTALL_ROOT} /etc/systemd/system
 
 StandardOutput=journal
 StandardError=journal
 # 沙箱：整树只读，仅 INSTALL_ROOT 可写（二进制位于其内 → control.upgrade 原子换核可用）
 ProtectSystem=strict
-ReadWritePaths=${INSTALL_ROOT}
+ReadWritePaths=${INSTALL_ROOT} /etc/systemd/system
 ProtectHome=true
 PrivateTmp=true
 ProtectKernelTunables=true

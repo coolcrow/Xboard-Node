@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"github.com/cedar2025/xboard-node/internal/relay"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -26,6 +27,7 @@ const (
 	WSEventControlReload  = "control.reload"  // panel → node/machine: force re-pull config
 	WSEventControlRestart = "control.restart"  // panel → node/machine: restart node / agent
 	WSEventControlUpgrade = "control.upgrade"  // panel → machine: self-upgrade agent binary
+	WSEventSyncRelay     = "sync.relay"     // panel → machine: realm 转发配置变更
 )
 
 // WSEvent is a parsed data event delivered to the service layer.
@@ -47,6 +49,9 @@ type WSEvent struct {
 
 	// Machine node discovery fields (for sync.nodes)
 	Nodes []MachineNode
+
+	// relay fields (for sync.relay)
+	Relay *relay.Spec
 }
 
 // WSStatusChange notifies the service when WS connectivity changes.
@@ -434,6 +439,9 @@ func (w *WSClient) handleMessage(msg wsMessage) {
 	case WSEventControlReload, WSEventControlRestart, WSEventControlUpgrade:
 		w.handleDataEvent(msg)
 
+	case WSEventSyncRelay:
+		w.handleDataEvent(msg)
+
 	default:
 		nlog.Core().Debug("ws unknown event", "event", msg.Event)
 	}
@@ -535,6 +543,14 @@ func (w *WSClient) handleDataEvent(msg wsMessage) {
 		event.Version = p.Version
 		event.SHA256AMD64 = p.SHA256AMD64
 		event.SHA256ARM64 = p.SHA256ARM64
+
+	case WSEventSyncRelay:
+		var spec relay.Spec
+		if err := decodeData(msg.Data, &spec); err != nil {
+			nlog.Core().Warn("ws: cannot decode relay payload", "error", err)
+			return
+		}
+		event.Relay = &spec
 	}
 
 	w.onEvent(event)

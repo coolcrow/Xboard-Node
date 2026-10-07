@@ -17,6 +17,7 @@ import (
 	"github.com/cedar2025/xboard-node/internal/buildinfo"
 	"github.com/cedar2025/xboard-node/internal/config"
 	"github.com/cedar2025/xboard-node/internal/nlog"
+	"github.com/cedar2025/xboard-node/internal/relay"
 	"github.com/go-viper/mapstructure/v2"
 )
 
@@ -347,7 +348,7 @@ func (c *Client) GetMachineNodes() (*MachineNodesResponse, error) {
 
 // ReportMachineStatus sends machine-level load metrics to the panel.
 // netIn/netOut are bytes/sec; negative values mean "unavailable" (first sample).
-func (c *Client) ReportMachineStatus(cpu float64, mem, swap, disk [2]uint64, netIn, netOut float64, upgradeStatus string) error {
+func (c *Client) ReportMachineStatus(cpu float64, mem, swap, disk [2]uint64, netIn, netOut float64, upgradeStatus string, relayStatus relay.Status) error {
 	payload := map[string]interface{}{
 		"cpu":           cpu,
 		"mem":           map[string]interface{}{"total": mem[0], "used": mem[1]},
@@ -357,6 +358,9 @@ func (c *Client) ReportMachineStatus(cpu float64, mem, swap, disk [2]uint64, net
 	}
 	if upgradeStatus != "" {
 		payload["upgrade_status"] = upgradeStatus
+	}
+	if b, err := json.Marshal(relayStatus); err == nil {
+		payload["relay_status"] = string(b)
 	}
 	if netIn >= 0 && netOut >= 0 {
 		payload["net"] = map[string]interface{}{"in_speed": netIn, "out_speed": netOut}

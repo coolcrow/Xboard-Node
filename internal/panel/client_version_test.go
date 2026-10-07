@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/cedar2025/xboard-node/internal/config"
+	"github.com/cedar2025/xboard-node/internal/relay"
 )
 
 func TestReportMachineStatus_IncludesAgentVersion(t *testing.T) {
@@ -36,7 +37,7 @@ func TestReportMachineStatus_IncludesAgentVersion(t *testing.T) {
 
 	if err := client.ReportMachineStatus(1.5,
 		[2]uint64{100, 50}, [2]uint64{10, 5}, [2]uint64{1000, 500},
-		1024.0, 2048.0, "",
+		1024.0, 2048.0, "", relay.Status{},
 	); err != nil {
 		t.Fatalf("ReportMachineStatus: %v", err)
 	}

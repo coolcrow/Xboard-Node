@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/cedar2025/xboard-node/internal/relay"
 )
 
 // StringOrArray is a type that can unmarshal from either a JSON string or an array of strings.
@@ -73,6 +75,7 @@ type MachineNode struct {
 type MachineNodesResponse struct {
 	Nodes      []MachineNode      `json:"nodes"`
 	BaseConfig MachineBaseConfig  `json:"base_config"`
+	Relay      *relay.Spec        `json:"relay,omitempty"` // agent 启动/重连的 relay 基线
 }
 
 // MachineBaseConfig holds polling intervals for machine mode.

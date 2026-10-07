@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cedar2025/xboard-node/internal/nlog"
@@ -233,8 +234,17 @@ func ensureUnit() error {
 	return nil
 }
 
+var applyMu sync.Mutex
+
 // Apply 是唯一入口：spec 未启用 → 拆除；启用 → 全量对齐（幂等）。
+// 串行执行：启动基线与 sync.relay 推送可能同时到达，并发会双下载、交错落盘。
 func Apply(s Spec) error {
+	applyMu.Lock()
+	defer applyMu.Unlock()
+	return applyLocked(s)
+}
+
+func applyLocked(s Spec) error {
 	if !s.Enabled || s.LandingHost == "" || strings.TrimSpace(s.Ports) == "" {
 		err := Disable()
 		setErr(err, s)
@@ -298,13 +308,20 @@ func Apply(s Spec) error {
 	return nil
 }
 
-// Disable 停用全部 relay 实例并移除配置（保留二进制与单元模板）。
+// Disable 停用 relay 实例并移除配置（保留二进制与单元模板）。
+// 所有权判定：只拆 agent 自己目录下有配置文件的实例——接管场景（机器上有
+// 旧手动部署的 realm）时，enabled=false 基线不得拆除尚未迁移的手动转发，
+// 否则面板配置到达前产生流量中断。
 func Disable() error {
 	for _, name := range []string{"dual", "tcp", "udp"} {
 		unit := "realm-relay@" + name
+		confPath := filepath.Join(etcDir, name+".toml")
+		if _, err := os.Stat(confPath); err != nil {
+			continue // 非本 agent 管理，不动
+		}
 		_, _ = systemctl("stop", unit)
 		_, _ = systemctl("disable", unit)
-		os.Remove(filepath.Join(etcDir, name+".toml"))
+		os.Remove(confPath)
 	}
 	return nil
 }

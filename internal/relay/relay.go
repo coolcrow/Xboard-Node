@@ -58,9 +58,24 @@ type Status struct {
 
 var lastError string
 
-// buckets 把端口字符串按协议分桶。语法与 relay-setup.sh 一致：
-// "443, 8443/tcp, 53/udp"（无后缀 = 双协议）。
-func buckets(raw string) (dual, tcp, udp []int, err error) {
+// portPair 入口端口 → 落地内核端口（entry:backend 语法；backend 缺省 = 同端口）。
+// 落地机同机双节点用 server_port 错开内核监听端口时，面板 relaySpec 会下发映射。
+type portPair struct {
+	listen  int
+	backend int
+}
+
+func parsePort(p string) (int, error) {
+	port, err := strconv.Atoi(p)
+	if err != nil || port < 1 || port > 65535 {
+		return 0, fmt.Errorf("invalid port %q", p)
+	}
+	return port, nil
+}
+
+// buckets 把端口字符串按协议分桶。语法与 relay-setup.sh 一致并扩展映射：
+// "443, 8443:28443/tcp, 53/udp"（无后缀 = 双协议；entry:backend = 错开内核端口）。
+func buckets(raw string) (dual, tcp, udp []portPair, err error) {
 	for _, item := range strings.Split(raw, ",") {
 		item = strings.TrimSpace(item)
 		if item == "" {
@@ -72,17 +87,31 @@ func buckets(raw string) (dual, tcp, udp []int, err error) {
 		} else {
 			portStr, proto = item, "dual"
 		}
-		port, perr := strconv.Atoi(portStr)
-		if perr != nil || port < 1 || port > 65535 {
-			return nil, nil, nil, fmt.Errorf("invalid port %q", item)
+		var pp portPair
+		if i := strings.IndexByte(portStr, ':'); i >= 0 {
+			listen, perr := parsePort(portStr[:i])
+			if perr != nil {
+				return nil, nil, nil, perr
+			}
+			backend, berr := parsePort(portStr[i+1:])
+			if berr != nil {
+				return nil, nil, nil, berr
+			}
+			pp = portPair{listen: listen, backend: backend}
+		} else {
+			listen, perr := parsePort(portStr)
+			if perr != nil {
+				return nil, nil, nil, perr
+			}
+			pp = portPair{listen: listen, backend: listen}
 		}
 		switch proto {
 		case "dual":
-			dual = append(dual, port)
+			dual = append(dual, pp)
 		case "tcp":
-			tcp = append(tcp, port)
+			tcp = append(tcp, pp)
 		case "udp":
-			udp = append(udp, port)
+			udp = append(udp, pp)
 		default:
 			return nil, nil, nil, fmt.Errorf("invalid proto %q (want tcp/udp or none)", item)
 		}
@@ -94,13 +123,13 @@ func buckets(raw string) (dual, tcp, udp []int, err error) {
 }
 
 // render 生成单个 toml 文件内容（与 relay-setup.sh gen_conf 输出逐字节兼容）。
-func render(landing string, noTCP, useUDP bool, ports []int) string {
+func render(landing string, noTCP, useUDP bool, ports []portPair) string {
 	var b strings.Builder
 	b.WriteString("[network]\n")
 	b.WriteString(fmt.Sprintf("no_tcp = %v\nuse_udp = %v\n", noTCP, useUDP))
 	b.WriteString("\n# managed by xboard-node agent (sync.relay)\n")
 	for _, p := range ports {
-		b.WriteString(fmt.Sprintf("[[endpoints]]\nlisten = \"0.0.0.0:%d\"\nremote = \"%s:%d\"\n", p, landing, p))
+		b.WriteString(fmt.Sprintf("[[endpoints]]\nlisten = \"0.0.0.0:%d\"\nremote = \"%s:%d\"\n", p.listen, landing, p.backend))
 	}
 	return b.String()
 }

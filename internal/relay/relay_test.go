@@ -5,20 +5,27 @@ import (
 	"testing"
 )
 
+func pp(listen, backend int) portPair { return portPair{listen: listen, backend: backend} }
+
 func TestBuckets(t *testing.T) {
 	cases := []struct {
-		in    string
-		d, c, u []int
-		err   bool
+		in      string
+		d, c, u []portPair
+		err     bool
 	}{
-		{"443,18443", []int{443, 18443}, nil, nil, false},
-		{"443/udp, 18443/tcp", nil, []int{18443}, []int{443}, false},
-		{" 443 , 53/udp ", []int{443}, nil, []int{53}, false},
+		{"443,18443", []portPair{pp(443, 443), pp(18443, 18443)}, nil, nil, false},
+		{"443/udp, 18443/tcp", nil, []portPair{pp(18443, 18443)}, []portPair{pp(443, 443)}, false},
+		{" 443 , 53/udp ", []portPair{pp(443, 443)}, nil, []portPair{pp(53, 53)}, false},
+		// entry:backend 映射（同机双节点 server_port 错开）
+		{"443:14443", []portPair{pp(443, 14443)}, nil, nil, false},
+		{"18443:28443/tcp", nil, []portPair{pp(18443, 28443)}, nil, false},
+		{"443:14443/udp", nil, nil, []portPair{pp(443, 14443)}, false},
 		{"", nil, nil, nil, true},
 		{"abc", nil, nil, nil, true},
 		{"443/sctp", nil, nil, nil, true},
 		{"0", nil, nil, nil, true},
 		{"70000", nil, nil, nil, true},
+		{"443:", nil, nil, nil, true},
 	}
 	for _, tc := range cases {
 		d, c, u, err := buckets(tc.in)
@@ -38,7 +45,7 @@ func TestBuckets(t *testing.T) {
 	}
 }
 
-func eq(a, b []int) bool {
+func eq(a, b []portPair) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -76,6 +83,21 @@ remote = "198.44.54.109:18443"
 	}
 	if _, has := fs["udp"]; has {
 		t.Error("empty udp bucket should be absent")
+	}
+}
+
+func TestFilesPortMapping(t *testing.T) {
+	fs, err := files(Spec{Enabled: true, LandingHost: "1.2.3.4", Ports: "443:14443,18443:28443/tcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dual := fs["dual"]
+	if !strings.Contains(dual, `listen = "0.0.0.0:443"`) || !strings.Contains(dual, `remote = "1.2.3.4:14443"`) {
+		t.Errorf("dual mapping wrong:\n%s", dual)
+	}
+	tcp := fs["tcp"]
+	if !strings.Contains(tcp, `listen = "0.0.0.0:18443"`) || !strings.Contains(tcp, `remote = "1.2.3.4:28443"`) {
+		t.Errorf("tcp mapping wrong:\n%s", tcp)
 	}
 }
 

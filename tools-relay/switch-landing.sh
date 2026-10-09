@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# switch-landing.sh — 中转一键换落地（用户无感知）
+# switch-landing.sh — 接入机一键换落地（用户无感知）
 #
-# 用法（中转机）：./switch-landing.sh 198.44.54.109
+# 用法（接入机）：./switch-landing.sh 198.44.54.109
 #
 # 行为：改写 /etc/realm/*.toml 全部 remote → 探测新落地可达 → 重启全部 realm 实例
 #       → 失败自动回滚。适用于 dual/tcp/udp 多实例布局。

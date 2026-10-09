@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# relay-setup.sh — AIBolt 中转层部署（realm，按协议分实例）
+# relay-setup.sh — AIBolt 接入层转发部署（realm，按协议分实例）
 #
-# 用法（中转机 root）：
+# 用法（接入机 root）：
 #   ./relay-setup.sh --landing 198.44.54.109 --ports 443,18443            # 全双协议（生产常规）
 #   ./relay-setup.sh --landing 198.44.54.109 --ports 443/udp,18443/tcp    # 单协议（端口冲突场景）
 #   ./relay-setup.sh --landing 198.44.54.109 --ports 443:14443,18443:28443/tcp
@@ -149,5 +149,5 @@ done
 [ $FAIL -eq 0 ] || { journalctl -u 'realm-relay@*' -n 15 --no-pager; exit 1; }
 echo ""
 echo "完成：入口端口 → 落地 ${LANDING}，实例:${ACTIVE}"
-echo "落地侧需放行中转 IP 的内核端口（entry:backend 映射时为 backend 端口）。"
+echo "落地侧需放行接入机 IP 的内核端口（entry:backend 映射时为 backend 端口）。"
 echo "换落地：./switch-landing.sh <新IP>；接入 agent 后面板 [保存并下发] 可直接接管本配置"

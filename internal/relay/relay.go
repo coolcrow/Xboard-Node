@@ -1,4 +1,4 @@
-// Package relay 让 agent 像管理代理内核一样管理 realm 中转：
+// Package relay 让 agent 像管理代理内核一样管理 realm 接入转发：
 // 面板下发 Spec（sync.relay 推送 / machine/nodes 基线拉取）→
 // 渲染 /etc/realm/*.toml → 供给二进制（sha256 固定）→ 管理 systemd 实例。
 //

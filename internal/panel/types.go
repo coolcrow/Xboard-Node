@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cedar2025/xboard-node/internal/firewall"
 	"github.com/cedar2025/xboard-node/internal/relay"
 )
 
@@ -76,6 +77,7 @@ type MachineNodesResponse struct {
 	Nodes      []MachineNode      `json:"nodes"`
 	BaseConfig MachineBaseConfig  `json:"base_config"`
 	Relay      *relay.Spec        `json:"relay,omitempty"` // agent 启动/重连的 relay 基线
+	Firewall   *firewall.Spec    `json:"firewall,omitempty"` // 落地机服务端口访问规格（喂入机白名单）
 }
 
 // MachineBaseConfig holds polling intervals for machine mode.

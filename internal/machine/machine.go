@@ -17,6 +17,7 @@ import (
 	"github.com/cedar2025/xboard-node/internal/buildinfo"
 	"github.com/cedar2025/xboard-node/internal/nlog"
 	"github.com/cedar2025/xboard-node/internal/panel"
+	"github.com/cedar2025/xboard-node/internal/firewall"
 	"github.com/cedar2025/xboard-node/internal/relay"
 	"github.com/cedar2025/xboard-node/internal/service"
 )
@@ -303,6 +304,11 @@ func (o *Orchestrator) rediscover(ctx context.Context) {
 
 	if nodesResp.Relay != nil {
 		o.applyRelay(*nodesResp.Relay) // 幂等：配置未变时 no-op
+	}
+	if nodesResp.Firewall != nil && nodesResp.Firewall.Managed {
+		if err := firewall.Apply(*nodesResp.Firewall); err != nil {
+			nlog.Core().Error("firewall: reconcile failed", "error", err)
+		}
 	}
 
 	wanted := make(map[int]panel.MachineNode, len(nodesResp.Nodes))

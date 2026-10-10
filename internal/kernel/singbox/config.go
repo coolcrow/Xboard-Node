@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -60,6 +61,22 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 
 	// Merge panel routes and static config routes
 	cfg["route"] = buildRoutes(nc.Routes, nc.CustomRouteRules, mergeRouteList(nc.CustomRoutes, kcfg.CustomRoute))
+
+	// Panel dns-action routes activate the DNS module: hijacked client DNS
+	// queries and (for catch-all "*" rules) the kernel's own domain resolution
+	// both go through the configured upstream. Custom config "dns" wins.
+	if dnsCfg, hijack := buildDNS(nc.Routes); hijack {
+		cfg["dns"] = dnsCfg
+		route := cfg["route"].(M)
+		rules := route["rules"].([]M)
+		// 劫持规则置顶：面板 block 等规则按目的地址匹配，不拦 DNS 查询，
+		// 但显式置顶避免任何后续规则在协议判定前抢走 DNS 流量
+		route["rules"] = append([]M{{"protocol": "dns", "action": "hijack-dns"}}, rules...)
+		if _, ok := route["default_domain_resolver"]; !ok {
+			route["default_domain_resolver"] = dnsCfg["final"]
+		}
+		// mergeCustomSingbox 里 custom dns 段"替换"面板生成段——保持既有优先级
+	}
 
 	// Automatically enable rule_set caching (cache_file) when panel routes
 	// reference geoip:/geosite: entries so that the downloaded .srs rule_set
@@ -195,6 +212,134 @@ func buildRoutes(panelRoutes []model.RouteRule, customRules []model.CustomRouteR
 	}
 }
 
+// buildDNS translates panel dns-action routes into a sing-box (1.12+) DNS
+// configuration. Semantics:
+//   - narrow match (domain list): dns.rules route those suffixes to the upstream
+//   - catch-all match ("*"): upstream becomes final — all hijacked queries AND
+//     the kernel's own outbound resolution (via default_domain_resolver) use it
+//
+// Upstream address forms: plain IP (udp:53), tcp://IP, tls://IP[:port],
+// https://host/path (DoH, resolved via system DNS).
+func buildDNS(panelRoutes []model.RouteRule) (M, bool) {
+	type dnsRoute struct {
+		upstream string
+		domains  []string
+		catchAll bool
+	}
+	var routes []dnsRoute
+	for _, pr := range panelRoutes {
+		if pr.Action != "dns" || strings.TrimSpace(pr.ActionValue) == "" {
+			continue
+		}
+		r := dnsRoute{upstream: strings.TrimSpace(pr.ActionValue)}
+		catchAll := false
+		for _, m := range pr.Match {
+			m = strings.TrimSpace(m)
+			if m == "" {
+				continue
+			}
+			if m == "*" {
+				catchAll = true
+				continue
+			}
+			// geoip:/CIDR 对 DNS 动作无意义，忽略
+			if strings.HasPrefix(m, "geoip:") || strings.Contains(m, "/") {
+				continue
+			}
+			r.domains = append(r.domains, strings.TrimPrefix(strings.TrimPrefix(m, "*."), "."))
+		}
+		if catchAll || len(r.domains) > 0 {
+			r.catchAll = catchAll
+			routes = append(routes, r)
+		}
+	}
+	if len(routes) == 0 {
+		return nil, false
+	}
+
+	servers := []M{{"tag": "dns-local", "type": "local"}}
+	serverTag := func(upstream string) string {
+		for i, srv := range servers {
+			if srv["__upstream"] == upstream {
+				return fmt.Sprintf("dns-upstream-%d", i)
+			}
+		}
+		tag := fmt.Sprintf("dns-upstream-%d", len(servers))
+		srv := dnsServerFor(upstream)
+		srv["tag"] = tag
+		srv["__upstream"] = upstream // 内部去重键，返回前剔除
+		servers = append(servers, srv)
+		return tag
+	}
+
+	var rules []M
+	final := "dns-local"
+	for _, r := range routes {
+		tag := serverTag(r.upstream)
+		if r.catchAll {
+			final = tag
+			continue
+		}
+		rules = append(rules, M{"domain_suffix": r.domains, "server": tag})
+	}
+
+	for i, srv := range servers { // strip internal dedup key
+		delete(srv, "__upstream")
+		_ = i
+	}
+
+	dns := M{"servers": servers, "final": final}
+	if len(rules) > 0 {
+		dns["rules"] = rules
+	}
+	return dns, true
+}
+
+// dnsServerFor converts a panel action_value address into a sing-box 1.12+
+// DNS server object (without the tag).
+func dnsServerFor(upstream string) M {
+	detour := M{"detour": "direct"}
+	if u, err := url.Parse(upstream); err == nil && (u.Scheme == "https" || u.Scheme == "tls" || u.Scheme == "tcp" || u.Scheme == "quic" || u.Scheme == "h3") {
+		host := u.Hostname()
+		srv := M{"type": u.Scheme, "server": host, "server_port": portOr(u.Port(), 53)}
+		if net.ParseIP(host) == nil { // DoH/DoT 域名需本地解析，避免自引用死锁
+			srv["domain_resolver"] = "dns-local"
+		}
+		if u.Scheme == "https" && u.Path != "" && u.Path != "/" {
+			srv["path"] = u.Path
+		}
+		for k, v := range detour {
+			srv[k] = v
+		}
+		return srv
+	}
+	host := strings.TrimPrefix(strings.TrimPrefix(upstream, "udp://"), "//")
+	host = strings.TrimSuffix(host, "/")
+	port := 53
+	if h, p, err := net.SplitHostPort(host); err == nil {
+		host = h
+		port = portOr(p, 53)
+	}
+	return M{"type": "udp", "server": host, "server_port": port, "detour": "direct"}
+}
+
+func portOr(p string, def int) int {
+	if p == "" {
+		return def
+	}
+	n := 0
+	for _, c := range p {
+		if c < '0' || c > '9' {
+			return def
+		}
+		n = n*10 + int(c-'0')
+	}
+	if n == 0 {
+		return def
+	}
+	return n
+}
+
 func compilePanelRouteRule(pr model.RouteRule) []M {
 	if len(pr.Match) == 0 {
 		return nil
@@ -214,16 +359,16 @@ func compilePanelRouteRule(pr model.RouteRule) []M {
 		domains = append(domains, item)
 	}
 
+	if pr.Action == "dns" {
+		// DNS 动作由 buildDNS 接管（生成 dns.servers + hijack-dns 规则）。
+		// 这里如果照旧编译成 route 规则会引用不存在的出站标签，sing-box 校验失败拒启
+		return nil
+	}
+
 	outbound := "block"
 	switch pr.Action {
 	case "direct":
 		outbound = "direct"
-	case "dns":
-		if pr.ActionValue != "" {
-			outbound = pr.ActionValue
-		} else {
-			outbound = "dns-out"
-		}
 	case "proxy":
 		if pr.ActionValue != "" {
 			outbound = pr.ActionValue

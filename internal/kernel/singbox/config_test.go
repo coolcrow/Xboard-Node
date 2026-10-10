@@ -887,3 +887,102 @@ func TestExtractECHInbound(t *testing.T) {
 		})
 	}
 }
+
+// —— dns 动作支持（面板"线路"dns 规则 → DNS 模块）——
+
+func TestBuildDNS_CatchAllSetsFinal(t *testing.T) {
+	cfg, ok := singboxDNSFromRoutes(t, []model.RouteRule{
+		{ID: 1, Match: []string{"*"}, Action: "dns", ActionValue: "1.1.1.1"},
+	})
+	if !ok {
+		t.Fatal("expected dns config to activate")
+	}
+	servers := cfg["servers"].([]M)
+	if len(servers) != 2 {
+		t.Fatalf("servers = %d, want 2 (local + upstream)", len(servers))
+	}
+	up := servers[1]
+	if up["type"] != "udp" || up["server"] != "1.1.1.1" || up["server_port"] != 53 || up["detour"] != "direct" {
+		t.Fatalf("upstream server = %v", up)
+	}
+	if cfg["final"] != "dns-upstream-1" {
+		t.Fatalf("final = %v, want dns-upstream-1", cfg["final"])
+	}
+	if _, has := cfg["rules"]; has {
+		t.Fatalf("catch-all should not emit domain rules: %v", cfg["rules"])
+	}
+	for _, srv := range servers { // 内部去重键必须剔除
+		if _, leak := srv["__upstream"]; leak {
+			t.Fatalf("internal key leaked: %v", srv)
+		}
+	}
+}
+
+func TestBuildDNS_PerDomainRules(t *testing.T) {
+	cfg, ok := singboxDNSFromRoutes(t, []model.RouteRule{
+		{ID: 1, Match: []string{"*.baidu.com", "geoip:cn", "10.0.0.0/8"}, Action: "dns", ActionValue: "tls://8.8.4.4:853"},
+	})
+	if !ok {
+		t.Fatal("expected dns config to activate")
+	}
+	servers := cfg["servers"].([]M)
+	up := servers[1]
+	if up["type"] != "tls" || up["server"] != "8.8.4.4" || up["server_port"] != 853 {
+		t.Fatalf("tls upstream = %v", up)
+	}
+	if cfg["final"] != "dns-local" { // 窄规则不动默认解析
+		t.Fatalf("final = %v, want dns-local", cfg["final"])
+	}
+	rules := cfg["rules"].([]M)
+	if len(rules) != 1 || rules[0]["server"] != "dns-upstream-1" {
+		t.Fatalf("rules = %v", rules)
+	}
+	domains := rules[0]["domain_suffix"].([]string)
+	if len(domains) != 1 || domains[0] != "baidu.com" {
+		t.Fatalf("domains = %v (geoip/cidr 应被忽略)", domains)
+	}
+}
+
+func TestBuildDNS_MixedRulesDedupUpstream(t *testing.T) {
+	cfg, ok := singboxDNSFromRoutes(t, []model.RouteRule{
+		{ID: 1, Match: []string{"a.com"}, Action: "dns", ActionValue: "1.1.1.1"},
+		{ID: 2, Match: []string{"b.com", "c.com"}, Action: "dns", ActionValue: "1.1.1.1"},
+	})
+	if !ok {
+		t.Fatal("expected dns config")
+	}
+	if n := len(cfg["servers"].([]M)); n != 2 {
+		t.Fatalf("servers = %d, want 2 (同上游去重)", n)
+	}
+	if n := len(cfg["rules"].([]M)); n != 2 {
+		t.Fatalf("rules = %d, want 2", n)
+	}
+}
+
+func TestBuildRoutes_DNSActionSkippedInRouteRules(t *testing.T) {
+	m := buildRoutes([]model.RouteRule{
+		{ID: 1, Match: []string{"ads.example.com"}, Action: "block"},
+		{ID: 2, Match: []string{"*"}, Action: "dns", ActionValue: "1.1.1.1"},
+	}, nil, nil)
+	rules := m["rules"].([]M)
+	for _, r := range rules {
+		if r["outbound"] == "dns-out" || r["outbound"] == "1.1.1.1" {
+			t.Fatalf("dns action leaked into route rules: %v", r)
+		}
+	}
+	found := false
+	for _, r := range rules {
+		if r["outbound"] == "block" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("block rule missing")
+	}
+}
+
+func singboxDNSFromRoutes(t *testing.T, routes []model.RouteRule) (M, bool) {
+	t.Helper()
+	cfg, hijack := buildDNS(routes)
+	return cfg, hijack
+}

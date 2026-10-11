@@ -725,8 +725,14 @@ backup_existing_state() {
     else
         SERVICE_EXISTED=0
     fi
-    # 轮转：仅保留最近 5 份（每份含 60MB+ 二进制，无轮转会无限累积吃盘）
-    ls -1dt "${BACKUP_DIR}"/20[0-9][0-9]-* 2>/dev/null | tail -n +6 | xargs -r rm -rf
+    # 轮转：仅保留最近 5 份（每份含 60MB+ 二进制，无轮转会无限累积吃盘）。
+    # 用 find 而非 glob+ls：备份目录名是 date +%Y%m%d-%H%M%S（8 位数字），
+    # glob 写错位数会零匹配 → ls 字面量 exit 2 → pipefail 杀死整个升级并触发
+    # 回滚重启（2026-10-11 幽灵升级事故：四次"失败的升级"其实全死在这一行，
+    # 新二进制从未装上，journal 里的内核错误是回滚重启的旧版发出的）。
+    # find 零匹配恒 exit 0，轮转失败也绝不阻断升级流程。
+    find "${BACKUP_DIR}" -maxdepth 1 -type d -name '20*-*' -printf '%T@ %p\n' 2>/dev/null \
+        | sort -rn | tail -n +6 | cut -d' ' -f2- | xargs -r rm -rf || true
 }
 
 stop_existing_service() {

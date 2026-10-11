@@ -725,6 +725,8 @@ backup_existing_state() {
     else
         SERVICE_EXISTED=0
     fi
+    # 轮转：仅保留最近 5 份（每份含 60MB+ 二进制，无轮转会无限累积吃盘）
+    ls -1dt "${BACKUP_DIR}"/20[0-9][0-9]-* 2>/dev/null | tail -n +6 | xargs -r rm -rf
 }
 
 stop_existing_service() {

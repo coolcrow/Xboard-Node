@@ -833,6 +833,10 @@ perform_upgrade() {
     stage_xbctl
     render_service
     backup_existing_state
+    # 升级时同步刷新自拷贝，避免 /etc/xboard-node/install.sh 长期停在旧版
+    if [ -f "$0" ] && [ "$(realpath "$0" 2>/dev/null || echo "$0")" != "$(realpath "$INSTALLER_COPY_PATH" 2>/dev/null || echo "$INSTALLER_COPY_PATH")" ]; then
+        install -m 755 "$0" "$INSTALLER_COPY_PATH"
+    fi
     install -m 755 "$TMP_DIR/xboard-node" "$BINARY_PATH"
     install -m 755 "$TMP_DIR/xbctl" "$CLI_PATH"
     ln -sf "$CLI_PATH" /usr/bin/xbctl 2>/dev/null || true

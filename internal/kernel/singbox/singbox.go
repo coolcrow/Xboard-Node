@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -23,6 +24,58 @@ import (
 	"github.com/cedar2025/xboard-node/internal/model"
 	"github.com/cedar2025/xboard-node/internal/nlog"
 )
+
+// dumpFailedConfig 内核启动失败时把脱敏配置写到安装根目录，供事后取证
+// （journal 对超长字段不可靠；文件是最确定的证据通道）
+func dumpFailedConfig(data []byte, nc *model.NodeSpec) {
+	path := "/etc/xboard-node/last-failed-config.json"
+	if err := os.WriteFile(path, []byte(redactForLog(data)), 0600); err != nil {
+		nlog.Core().Warn("failed to dump config", "error", err)
+		return
+	}
+	nlog.Core().Error("kernel start failed; redacted config dumped", "protocol", nc.Protocol, "path", path)
+}
+
+// secretKeys 这些键的值在故障转储日志中必须打码（用户凭据不入 journal）
+var secretKeys = map[string]bool{
+	"password": true, "uuid": true, "private_key": true, "secret": true,
+}
+
+func redactForLog(data []byte) string {
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		return "<unmarshal failed: " + err.Error() + ">"
+	}
+	redacted := redactValue(v)
+	out, err := json.Marshal(redacted)
+	if err != nil {
+		return "<marshal failed>"
+	}
+	return string(out)
+}
+
+func redactValue(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, val := range t {
+			if secretKeys[k] {
+				if _, isStr := val.(string); isStr {
+					t[k] = "***"
+					continue
+				}
+			}
+			t[k] = redactValue(val)
+		}
+		return t
+	case []any:
+		for i, val := range t {
+			t[i] = redactValue(val)
+		}
+		return t
+	default:
+		return v
+	}
+}
 
 // drainTimeout is how long stop() waits for in-flight connections to finish
 // naturally after closing all listen sockets, before hard-killing them.
@@ -121,12 +174,16 @@ func (s *SingBox) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls 
 		Options: opts,
 	})
 	if err != nil {
+		dumpFailedConfig(data, nodeConfig)
+		nlog.Core().Error("sing-box create failed; redacted config dumped to file", "error", err)
 		cancel()
 		return fmt.Errorf("create sing-box instance: %w", err)
 	}
 
 	if err := instance.Start(); err != nil {
 		instance.Close()
+		dumpFailedConfig(data, nodeConfig)
+		nlog.Core().Error("sing-box start failed; redacted config dumped to file", "error", err)
 		cancel()
 		return fmt.Errorf("start sing-box: %w", err)
 	}

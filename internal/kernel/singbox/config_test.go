@@ -902,8 +902,11 @@ func TestBuildDNS_CatchAllSetsFinal(t *testing.T) {
 		t.Fatalf("servers = %d, want 2 (local + upstream)", len(servers))
 	}
 	up := servers[1]
-	if up["type"] != "udp" || up["server"] != "1.1.1.1" || up["server_port"] != 53 || up["detour"] != "direct" {
+	if up["type"] != "udp" || up["server"] != "1.1.1.1" || up["server_port"] != 53 {
 		t.Fatalf("upstream server = %v", up)
+	}
+	if _, has := up["detour"]; has {
+		t.Fatalf("detour must not be set (sing-box 1.14 rejects empty-direct detour): %v", up)
 	}
 	if cfg["final"] != "dns-upstream-1" {
 		t.Fatalf("final = %v, want dns-upstream-1", cfg["final"])
@@ -985,4 +988,36 @@ func singboxDNSFromRoutes(t *testing.T, routes []model.RouteRule) (M, bool) {
 	t.Helper()
 	cfg, hijack := buildDNS(routes)
 	return cfg, hijack
+}
+
+func TestBuildConfig_DNSModuleEngagesKernelResolution(t *testing.T) {
+	kcfg := config.KernelConfig{ConfigDir: t.TempDir()}
+	nc := &model.NodeSpec{
+		Protocol: "trojan", ServerPort: 443,
+		Routes: []model.RouteRule{
+			{ID: 3, Match: []string{"*"}, Action: "dns", ActionValue: "1.1.1.1"},
+		},
+	}
+	cfg := buildConfig(kcfg, nc, nil, kernel.TLSCert{})
+
+	// dns 段 + 劫持规则置顶
+	dns, ok := cfg["dns"].(M)
+	if !ok {
+		t.Fatal("dns section missing")
+	}
+	if dns["final"] != "dns-upstream-1" {
+		t.Fatalf("final = %v", dns["final"])
+	}
+	route := cfg["route"].(M)
+	rules := route["rules"].([]M)
+	hijack, _ := rules[0]["action"].(string)
+	if hijack != "hijack-dns" || rules[0]["protocol"] != "dns" {
+		t.Fatalf("hijack rule not first: %v", rules[0])
+	}
+
+	// 关键：default_domain_resolver 必须是对象形式（字符串被 sing-box 静默忽略）
+	resolver, ok := route["default_domain_resolver"].(M)
+	if !ok || resolver["server"] != "dns-upstream-1" {
+		t.Fatalf("default_domain_resolver = %#v, want {server: dns-upstream-1}", route["default_domain_resolver"])
+	}
 }

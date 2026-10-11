@@ -73,7 +73,9 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 		// 但显式置顶避免任何后续规则在协议判定前抢走 DNS 流量
 		route["rules"] = append([]M{{"protocol": "dns", "action": "hijack-dns"}}, rules...)
 		if _, ok := route["default_domain_resolver"]; !ok {
-			route["default_domain_resolver"] = dnsCfg["final"]
+			// DomainResolveOptions 是对象（{"server": tag}）——字符串形式会被
+			// sing-box 静默忽略（实测内核解析回落系统 8.8.8.8 而非 1.1.1.1）
+			route["default_domain_resolver"] = M{"server": dnsCfg["final"]}
 		}
 		// mergeCustomSingbox 里 custom dns 段"替换"面板生成段——保持既有优先级
 	}
@@ -298,7 +300,8 @@ func buildDNS(panelRoutes []model.RouteRule) (M, bool) {
 // dnsServerFor converts a panel action_value address into a sing-box 1.12+
 // DNS server object (without the tag).
 func dnsServerFor(upstream string) M {
-	detour := M{"detour": "direct"}
+	// 注意：不设 detour——默认拨号即直连；sing-box 1.14 拒绝
+	// "detour to an empty direct outbound makes no sense"
 	if u, err := url.Parse(upstream); err == nil && (u.Scheme == "https" || u.Scheme == "tls" || u.Scheme == "tcp" || u.Scheme == "quic" || u.Scheme == "h3") {
 		host := u.Hostname()
 		srv := M{"type": u.Scheme, "server": host, "server_port": portOr(u.Port(), 53)}
@@ -307,9 +310,6 @@ func dnsServerFor(upstream string) M {
 		}
 		if u.Scheme == "https" && u.Path != "" && u.Path != "/" {
 			srv["path"] = u.Path
-		}
-		for k, v := range detour {
-			srv[k] = v
 		}
 		return srv
 	}
@@ -320,7 +320,7 @@ func dnsServerFor(upstream string) M {
 		host = h
 		port = portOr(p, 53)
 	}
-	return M{"type": "udp", "server": host, "server_port": port, "detour": "direct"}
+	return M{"type": "udp", "server": host, "server_port": port}
 }
 
 func portOr(p string, def int) int {

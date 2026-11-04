@@ -22,6 +22,10 @@ BINARY_PATH="${INSTALL_BIN_DIR}/xboard-node"
 LEGACY_BINARY_PATH="/usr/local/bin/xboard-node"
 SERVICE_NAME="xboard-node.service"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
+ROLLBACK_SERVICE_NAME="xboard-node-rollback.service"
+ROLLBACK_SERVICE_PATH="/etc/systemd/system/${ROLLBACK_SERVICE_NAME}"
+ROLLBACK_SCRIPT_PATH="${INSTALL_BIN_DIR}/rollback-on-crashloop.sh"
+CRASHLOOP_MARKER="${INSTALL_ROOT}/.crashloop-rolledback"
 CLI_PATH="${INSTALL_BIN_DIR}/xbctl"
 LEGACY_CLI_PATH="/usr/local/bin/xbctl"
 INSTALLER_COPY_PATH="${INSTALL_ROOT}/install.sh"
@@ -668,6 +672,10 @@ Description=Xboard Node Backend
 Documentation=https://github.com/cedar2025/xboard-node
 After=network-online.target
 Wants=network-online.target
+# 崩溃循环熔断：180s 内 5 次启动失败 → 进入 failed → 触发 OnFailure 兜底换回备份
+StartLimitIntervalSec=180
+StartLimitBurst=5
+OnFailure=xboard-node-rollback.service
 
 [Service]
 Type=simple
@@ -699,6 +707,52 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
 [Install]
 WantedBy=multi-user.target
 EOF_UNIT
+}
+
+# 崩溃循环兜底：xboard-node 因 StartLimitBurst 打满进入 failed 时（OnFailure），
+# 换回最近一次备份二进制再拉起。MARKER 一次性熔断防新旧互踢死循环；
+# 升级成功后 perform_upgrade 清除 MARKER 重新武装。
+render_rollback_service() {
+    cat >"${TMP_DIR}/${ROLLBACK_SERVICE_NAME}" <<EOF_RU
+[Unit]
+Description=Xboard Node crash-loop rollback (restore last backup binary)
+
+[Service]
+Type=oneshot
+ExecStart=${ROLLBACK_SCRIPT_PATH}
+EOF_RU
+
+    cat >"${TMP_DIR}/rollback-on-crashloop.sh" <<'EOF_RS'
+#!/bin/sh
+MARKER="__CRASHLOOP_MARKER__"
+BIN="__BINARY_PATH__"
+SERVICE="__SERVICE_NAME__"
+BACKUP_DIR="__BACKUP_DIR__"
+
+[ -e "$MARKER" ] && exit 0
+BACKUP=$(ls -1dt "$BACKUP_DIR"/*/xboard-node 2>/dev/null | head -1)
+if [ -z "$BACKUP" ] || [ ! -f "$BACKUP" ]; then exit 0; fi
+if [ "$(readlink -f "$BACKUP" 2>/dev/null)" = "$(readlink -f "$BIN" 2>/dev/null)" ]; then exit 0; fi
+if ! install -m 755 "$BACKUP" "$BIN"; then exit 1; fi
+date +%s > "$MARKER"
+logger -t xboard-node-rollback "crash-loop detected, restored $BACKUP" || true
+systemctl start "$SERVICE"
+EOF_RS
+    sed -i \
+        -e "s|__CRASHLOOP_MARKER__|${CRASHLOOP_MARKER}|g" \
+        -e "s|__BINARY_PATH__|${BINARY_PATH}|g" \
+        -e "s|__SERVICE_NAME__|${SERVICE_NAME}|g" \
+        -e "s|__BACKUP_DIR__|${BACKUP_DIR}|g" \
+        "${TMP_DIR}/rollback-on-crashloop.sh"
+    chmod +x "${TMP_DIR}/rollback-on-crashloop.sh"
+}
+
+install_rollback_service() {
+    if [ ! -f "${TMP_DIR}/${ROLLBACK_SERVICE_NAME}" ]; then
+        return
+    fi
+    install -m 755 "${TMP_DIR}/rollback-on-crashloop.sh" "${ROLLBACK_SCRIPT_PATH}"
+    install -m 644 "${TMP_DIR}/${ROLLBACK_SERVICE_NAME}" "${ROLLBACK_SERVICE_PATH}"
 }
 
 backup_existing_state() {
@@ -753,6 +807,8 @@ install_staged_files() {
     install -m 755 "$TMP_DIR/xbctl" "$CLI_PATH"
     ln -sf "$CLI_PATH" /usr/bin/xbctl 2>/dev/null || true
     install -m 644 "$TMP_DIR/${SERVICE_NAME}" "$SERVICE_PATH"
+    render_rollback_service
+    install_rollback_service
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME" > /dev/null 2>&1
 }
@@ -847,6 +903,8 @@ perform_upgrade() {
     install -m 755 "$TMP_DIR/xbctl" "$CLI_PATH"
     ln -sf "$CLI_PATH" /usr/bin/xbctl 2>/dev/null || true
     install -m 644 "$TMP_DIR/${SERVICE_NAME}" "$SERVICE_PATH"
+    render_rollback_service
+    install_rollback_service
     systemctl daemon-reload
     systemctl restart "$SERVICE_NAME"
     if ! wait_for_health; then
@@ -854,6 +912,8 @@ perform_upgrade() {
         show_recent_logs
         return 1
     fi
+    # 升级成功：清除崩溃回退熔断标记，兜底机制对新版本重新武装
+    rm -f "$CRASHLOOP_MARKER"
     log_info "Upgrade succeeded"
 }
 
@@ -880,6 +940,7 @@ perform_uninstall() {
     rm -f "$BINARY_PATH"
     rm -f "$CLI_PATH"
     rm -f /usr/bin/xbctl 2>/dev/null || true
+    rm -f "$ROLLBACK_SERVICE_PATH" "$ROLLBACK_SCRIPT_PATH" "$CRASHLOOP_MARKER" 2>/dev/null || true
     # relay 实例二进制/配置住在 INSTALL_ROOT 内——purge 前必须停用，否则留下 broken 单元
     for i in dual tcp udp; do
         systemctl stop "realm-relay@${i}" >/dev/null 2>&1 || true

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,6 +31,46 @@ type nodeHandle struct {
 	service *service.Service
 }
 
+// nodeState 跟踪节点服务健康度：心跳上报（load_status.nodes）+ 崩溃重试退避共用。
+type nodeState struct {
+	Status      string // "running" | "starting" | "crashed"
+	Err         string    // 最近一次崩溃原因（截断）
+	Consecutive int       // 连续崩溃次数（运行超过复位阈值则重新计数）
+	LastCrash   time.Time
+	RanFor      time.Duration // 上次完整运行的时长
+}
+
+const (
+	// nodeRunConfirmDelay：崩溃后的重试要稳定存活超过该时长才报 "running"，
+	// 避免重试启动与再次崩溃之间的亚秒窗口被心跳抽样成 running → 面板误发恢复通知
+	nodeRunConfirmDelay = 10 * time.Second
+)
+
+const (
+	nodeRetryBaseDelay = 30 * time.Second
+	nodeRetryMaxDelay  = 5 * time.Minute
+	// 单次运行超过该时长后崩溃 → 视为"稳定过"，连续计数重新从 1 开始
+	nodeRunResetThreshold = 2 * time.Minute
+)
+
+// nodeRetryDelay 返回第 n 次连续崩溃后重启该节点前需要等待的退避窗口。
+// rediscover 每 pull 周期（默认 60s）会尝试补起缺失节点，本退避决定"是否放行"，
+// 实际重试间隔 = max(pull 周期, 退避窗口)。
+func nodeRetryDelay(consecutive int) time.Duration {
+	switch {
+	case consecutive <= 1:
+		return nodeRetryBaseDelay
+	case consecutive == 2:
+		return 60 * time.Second
+	case consecutive == 3:
+		return 120 * time.Second
+	case consecutive == 4:
+		return 240 * time.Second
+	default:
+		return nodeRetryMaxDelay
+	}
+}
+
 // Orchestrator manages all nodes bound to a panel machine. It:
 //   - discovers nodes via GET /machine/nodes
 //   - starts / stops Service instances as nodes are added / removed
@@ -40,7 +81,9 @@ type Orchestrator struct {
 	client *panel.Client // machine-level client (no node_id)
 
 	mu    sync.Mutex
-	nodes map[int]*nodeHandle // node_id → handle
+	nodes map[int]*nodeHandle // node_id → handle（注意：崩溃路径必须清理，否则 startNode 视为已运行永不重启）
+	// nodeStates 与 nodes 同一把锁；节点被主动移除时一并清理
+	nodeStates map[int]*nodeState
 
 	// Per-node mailbox keyed by node_id. Shared WS events are aggregated here
 	// and each node service drains the latest state when ready.
@@ -80,11 +123,12 @@ func New(cfg *config.Config) *Orchestrator {
 		MachineID: cfg.Machine.MachineID,
 	}
 	return &Orchestrator{
-		cfg:       cfg,
-		client:    panel.NewClient(panelCfg),
-		nodes:     make(map[int]*nodeHandle),
-		mailboxes: make(map[int]*controlplane.NodeMailbox),
-		statuses:  make(map[int]chan<- controlplane.StatusChange),
+		cfg:        cfg,
+		client:     panel.NewClient(panelCfg),
+		nodes:      make(map[int]*nodeHandle),
+		nodeStates: make(map[int]*nodeState),
+		mailboxes:  make(map[int]*controlplane.NodeMailbox),
+		statuses:   make(map[int]chan<- controlplane.StatusChange),
 	}
 }
 
@@ -142,11 +186,29 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 		o.mu.Unlock()
 		return
 	}
+	// 崩溃退避：距上次崩溃不足退避窗口则本轮跳过，等下一轮 rediscover 再试
+	if st, ok := o.nodeStates[mn.ID]; ok && st.Status == "crashed" {
+		wait := nodeRetryDelay(st.Consecutive)
+		if since := time.Since(st.LastCrash); since < wait {
+			o.mu.Unlock()
+			nlog.Core().Debug("machine: node retry backoff, skip start",
+				"node_id", mn.ID, "consecutive", st.Consecutive,
+				"eligible_in", (wait - since).Round(time.Second))
+			return
+		}
+	}
 
 	nodeCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	mb := controlplane.NewNodeMailbox()
 	o.nodes[mn.ID] = &nodeHandle{cancel: cancel, done: done, mailbox: mb}
+	if prev := o.nodeStates[mn.ID]; prev == nil {
+		o.nodeStates[mn.ID] = &nodeState{Status: "running"}
+	} else if prev.Status == "crashed" {
+		prev.Status = "starting"
+	} else {
+		prev.Status = "running"
+	}
 	o.mu.Unlock()
 
 	o.eventsMu.Lock()
@@ -201,9 +263,54 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 	nlog.Go("machine.nodeRun", func() {
 		defer close(done)
 		defer o.unregisterNode(mn.ID)
-		if err := svc.Run(nodeCtx); err != nil {
+		started := time.Now()
+		confirmRunning := time.AfterFunc(nodeRunConfirmDelay, func() {
+			o.mu.Lock()
+			defer o.mu.Unlock()
+			if st, ok := o.nodeStates[mn.ID]; ok && st.Status == "starting" {
+				st.Status = "running"
+			}
+		})
+		defer confirmRunning.Stop()
+		err := svc.Run(nodeCtx)
+
+		o.mu.Lock()
+		// 崩溃路径清理僵尸句柄：不清则 startNode 视为"已运行"，rediscover 永远不会重启它
+		// （2026-10-24 客户事故：节点服务退出后搁浅 11 天的直接根因）。
+		// stopNode 已先行删除句柄，h.done == done 保证只删自己的。
+		if h, ok := o.nodes[mn.ID]; ok && h.done == done {
+			delete(o.nodes, mn.ID)
+		}
+		if err != nil && nodeCtx.Err() == nil {
+			st := o.nodeStates[mn.ID]
+			if st == nil {
+				st = &nodeState{}
+				o.nodeStates[mn.ID] = st
+			}
+			ranFor := time.Since(started)
+			st.Status = "crashed"
+			st.Err = err.Error()
+			if len(st.Err) > 256 {
+				st.Err = st.Err[:256]
+			}
+			st.LastCrash = time.Now()
+			st.RanFor = ranFor
+			if ranFor >= nodeRunResetThreshold {
+				st.Consecutive = 1
+			} else {
+				st.Consecutive++
+			}
+			consecutive := st.Consecutive
+			o.mu.Unlock()
 			nlog.Core().Error("machine node exited with error",
-				"node_id", mn.ID, "error", err)
+				"node_id", mn.ID, "error", err,
+				"consecutive_crashes", consecutive,
+				"retry_eligible_in", nodeRetryDelay(consecutive).Round(time.Second))
+			return
+		}
+		o.mu.Unlock()
+		if err != nil {
+			nlog.Core().Debug("machine node stopped", "node_id", mn.ID, "error", err)
 		}
 	})
 }
@@ -261,6 +368,8 @@ func (o *Orchestrator) stopNode(nodeID int) {
 		return
 	}
 	delete(o.nodes, nodeID)
+	// 主动移除（面板删节点 / control.restart）同时清健康状态：restart 语义 = 退避归零
+	delete(o.nodeStates, nodeID)
 	o.mu.Unlock()
 
 	o.eventsMu.Lock()
@@ -354,10 +463,7 @@ func (o *Orchestrator) applyRelay(spec relay.Spec) {
 func (o *Orchestrator) reportMachineStatus() {
 	s := monitor.Collect()
 	upgradeStatus, _ := o.upgradeStatus.Load().(string)
-	healthyDisarm := o.healthyDisarm
-	if healthyDisarm != nil {
-		defer func() { healthyDisarm() }()
-	}
+	nodes := o.nodeStatusSnapshot()
 	if err := o.client.ReportMachineStatus(
 		s.CPU,
 		[2]uint64{s.MemTotal, s.MemUsed},
@@ -366,9 +472,76 @@ func (o *Orchestrator) reportMachineStatus() {
 		s.NetInSpeed, s.NetOutSpeed,
 		upgradeStatus,
 		relay.Collect(),
+		nodes,
 	); err != nil {
 		nlog.Core().Warn("machine status report failed", "error", err)
+		return
 	}
+	// 看门狗解除门槛：上报成功 + 升级前健康的节点全部恢复运行。
+	// 只看心跳不看节点的旧判定让 2026-10-24 事故以"升级成功"收场（进程活着、内核全死）。
+	if healthyDisarm := o.healthyDisarm; healthyDisarm != nil && o.allExpectedNodesHealthy() {
+		healthyDisarm()
+	}
+}
+
+// nodeStatusSnapshot 生成心跳里的节点级状态（load_status.nodes），面板据此告警。
+func (o *Orchestrator) nodeStatusSnapshot() map[string]interface{} {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if len(o.nodeStates) == 0 {
+		return nil
+	}
+	out := make(map[string]interface{}, len(o.nodeStates))
+	for id, st := range o.nodeStates {
+		e := map[string]interface{}{"status": st.Status}
+		if st.Status == "crashed" || st.Status == "starting" {
+			// starting 保留最近一次崩溃上下文：面板据此区分"重试中"与"健康"
+			if st.Err != "" {
+				e["error"] = st.Err
+			}
+			e["consecutive"] = st.Consecutive
+			if st.Status == "crashed" {
+				remaining := nodeRetryDelay(st.Consecutive) - time.Since(st.LastCrash)
+				if remaining < 0 {
+					remaining = 0
+				}
+				e["retry_in"] = int(remaining.Seconds())
+			}
+		}
+		out[strconv.Itoa(id)] = e
+	}
+	return out
+}
+
+// healthyNodeIDs 返回当前处于 running 状态的节点（升级换核前调用，写入看门狗标记）。
+func (o *Orchestrator) healthyNodeIDs() []int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	ids := make([]int, 0, len(o.nodeStates))
+	for id, st := range o.nodeStates {
+		if st.Status == "running" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// allExpectedNodesHealthy：看门狗期望集（升级标记里的健康节点）全部 running 才放行解除。
+// 期望集为空（常规重启 / 升级前本就无健康节点）→ 仅凭心跳解除。
+func (o *Orchestrator) allExpectedNodesHealthy() bool {
+	expected := watchdogExpectedHealthy()
+	if len(expected) == 0 {
+		return true
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, id := range expected {
+		st, ok := o.nodeStates[id]
+		if !ok || st.Status != "running" {
+			return false
+		}
+	}
+	return true
 }
 
 // ─── WS mux ─────────────────────────────────────────────────────────────
@@ -516,6 +689,11 @@ func (o *Orchestrator) applyIntervals(bc panel.MachineBaseConfig) {
 	o.pushInterval = time.Duration(bc.PushInterval) * time.Second
 	if o.pushInterval < 10*time.Second {
 		o.pushInterval = 60 * time.Second
+	}
+	// 心跳必须能在升级看门狗窗口（240s）内稳定打满两拍，
+	// 否则健康升级会在首拍到来前被看门狗误回退
+	if o.pushInterval > 120*time.Second {
+		o.pushInterval = 120 * time.Second
 	}
 }
 

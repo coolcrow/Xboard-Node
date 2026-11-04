@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -122,8 +123,9 @@ func (o *Orchestrator) selfUpgrade(version, shaAMD64, shaARM64 string) {
 
 	// 换核成功后写 pending 标记：新进程启动时据此布防看门狗——若在窗口期内未达到
 	// 健康信号（MarkHealthy），自动恢复备份二进制并退出，systemd 拉回旧版本。
-	// 覆盖“新二进制通过 -v 校验但在真实启动路径上崩溃”的残余风险。
-	if err := writeUpgradeMarker(dir, backup); err != nil {
+	// 标记携带升级前健康的节点集：解除条件 = 心跳成功 + 这些节点全部恢复运行，
+	// 覆盖"新二进制通过 -v 校验但节点服务全灭"的残余风险（2026-10-24 事故形态）。
+	if err := writeUpgradeMarker(dir, backup, o.healthyNodeIDs()); err != nil {
 		nlog.Core().Warn("upgrade marker write failed; new binary starts without watchdog", "error", err)
 	}
 
@@ -138,19 +140,45 @@ func (o *Orchestrator) selfUpgrade(version, shaAMD64, shaARM64 string) {
 // ─── 启动看门狗（P0 回滚）────────────────────────────────────────────
 
 const upgradeMarkerName = ".xboard-node.upgrade-pending"
-const upgradeWatchdogTimeout = 120 * time.Second
 
-func writeUpgradeMarker(dir, backupPath string) error {
-	return os.WriteFile(filepath.Join(dir, upgradeMarkerName), []byte(backupPath), 0o600)
+// 窗口要覆盖：首跳心跳（push_interval，默认 60s）+ 至少一轮节点崩溃重试，
+// 240s 内期望节点未全部恢复即回退。
+const upgradeWatchdogTimeout = 240 * time.Second
+
+// upgradeMarker 换核 pending 标记；Healthy 为升级前处于 running 的节点集，
+// 新版本的看门狗解除条件 = 心跳成功 + 该集合全部恢复运行。
+type upgradeMarker struct {
+	Backup  string `json:"backup"`
+	Healthy []int  `json:"healthy,omitempty"`
+}
+
+func writeUpgradeMarker(dir, backupPath string, healthy []int) error {
+	b, err := json.Marshal(upgradeMarker{Backup: backupPath, Healthy: healthy})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, upgradeMarkerName), b, 0o600)
 }
 
 // ArmUpgradeWatchdog 在进程启动早期调用：若存在换核 pending 标记，布防看门狗。
 // 返回的 disarm 函数在达到健康信号时调用（幂等）。
 var (
-	watchdogArmed   atomic.Bool
-	watchdogDisarm  func()
-	watchdogInitMu  sync.Mutex
+	watchdogArmed  atomic.Bool
+	watchdogDisarm func()
+	watchdogInitMu sync.Mutex
+	// watchdogExpected 记录标记里的健康节点集（未布防时为 nil）
+	watchdogExpected []int
 )
+
+// watchdogExpectedHealthy 返回升级看门狗的期望健康节点集；空集 = 仅凭心跳解除。
+func watchdogExpectedHealthy() []int {
+	return watchdogExpected
+}
+
+// fallbackMarkerBackup 解析旧版纯路径标记（新 JSON 标记之前的格式）
+func fallbackMarkerBackup(raw []byte) string {
+	return strings.TrimSpace(string(raw))
+}
 
 func ArmUpgradeWatchdog() (disarm func()) {
 	watchdogInitMu.Lock()
@@ -160,6 +188,7 @@ func ArmUpgradeWatchdog() (disarm func()) {
 	if watchdogArmed.Load() {
 		return watchdogDisarm
 	}
+	watchdogExpected = nil
 	live, err := os.Executable()
 	if err != nil {
 		watchdogDisarm = func() {}
@@ -167,14 +196,26 @@ func ArmUpgradeWatchdog() (disarm func()) {
 	}
 	dir := filepath.Dir(live)
 	markerPath := filepath.Join(dir, upgradeMarkerName)
-	backup, err := os.ReadFile(markerPath)
+	raw, err := os.ReadFile(markerPath)
 	if err != nil {
 		watchdogDisarm = func() {}
 		return watchdogDisarm // 无标记 = 常规重启，无需布防
 	}
+	var marker upgradeMarker
+	if json.Unmarshal(raw, &marker) == nil && marker.Backup != "" {
+		watchdogExpected = marker.Healthy
+	} else {
+		// 旧版标记仅含备份路径（跨版本升级在途）——退化为仅凭心跳解除
+		marker.Backup = fallbackMarkerBackup(raw)
+	}
+	if marker.Backup == "" {
+		watchdogDisarm = func() {}
+		return watchdogDisarm
+	}
 	watchdogArmed.Store(true)
-	backupPath := strings.TrimSpace(string(backup))
-	nlog.Core().Warn("upgrade watchdog armed: restore backup if not healthy in "+upgradeWatchdogTimeout.String(), "backup", backupPath)
+	backupPath := marker.Backup
+	nlog.Core().Warn("upgrade watchdog armed: restore backup if not healthy in "+upgradeWatchdogTimeout.String(),
+		"backup", backupPath, "expect_healthy_nodes", len(watchdogExpected))
 
 	done := make(chan struct{})
 	var once sync.Once

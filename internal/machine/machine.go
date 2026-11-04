@@ -477,6 +477,7 @@ func (o *Orchestrator) reportMachineStatus() {
 		nlog.Core().Warn("machine status report failed", "error", err)
 		return
 	}
+	persistNodeHealth(o.healthyNodeIDs())
 	// 看门狗解除门槛：上报成功 + 升级前健康的节点全部恢复运行。
 	// 只看心跳不看节点的旧判定让 2026-10-24 事故以"升级成功"收场（进程活着、内核全死）。
 	if healthyDisarm := o.healthyDisarm; healthyDisarm != nil && o.allExpectedNodesHealthy() {

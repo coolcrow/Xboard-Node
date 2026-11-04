@@ -72,6 +72,24 @@ func TestUpgradeMarkerLegacyPlainPath(t *testing.T) {
 	}
 }
 
+// 健康快照：写盘 → 读回（install.sh 升级路径的期望集继承源）
+func TestNodeHealthSnapshotRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	st := nodeHealthState{Healthy: []int64{2, 3}, UnixTime: time.Now().Unix()}
+	b, _ := json.Marshal(st)
+	if err := os.WriteFile(filepath.Join(dir, nodeHealthStateName), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := readNodeHealthSnapshot(dir)
+	if len(got) != 2 || got[0] != 2 || got[1] != 3 {
+		t.Errorf("readNodeHealthSnapshot = %v, want [2 3]", got)
+	}
+
+	if nil != readNodeHealthSnapshot(t.TempDir()) { // 缺文件 → nil
+		t.Error("missing snapshot file should return nil")
+	}
+}
+
 func TestAllExpectedNodesHealthy(t *testing.T) {
 	o := New(testConfig())
 	o.nodeStates[2] = &nodeState{Status: "running"}

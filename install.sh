@@ -905,6 +905,9 @@ perform_upgrade() {
     install -m 644 "$TMP_DIR/${SERVICE_NAME}" "$SERVICE_PATH"
     render_rollback_service
     install_rollback_service
+    # 看门狗标记：新进程启动时布防，节点级解除（Healthy 由 agent 从
+    # .node-health.json 的升级前快照继承）；解除或 240s 回退均由 agent 自己完成
+    printf '{"backup":"%s/xboard-node"}' "$BACKUP_PATH" >"${INSTALL_BIN_DIR}/.xboard-node.upgrade-pending" 2>/dev/null || true
     systemctl daemon-reload
     systemctl restart "$SERVICE_NAME"
     if ! wait_for_health; then

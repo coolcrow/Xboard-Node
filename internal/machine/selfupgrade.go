@@ -140,6 +140,7 @@ func (o *Orchestrator) selfUpgrade(version, shaAMD64, shaARM64 string) {
 // ─── 启动看门狗（P0 回滚）────────────────────────────────────────────
 
 const upgradeMarkerName = ".xboard-node.upgrade-pending"
+const nodeHealthStateName = ".node-health.json"
 
 // 窗口要覆盖：首跳心跳（push_interval，默认 60s）+ 至少一轮节点崩溃重试，
 // 240s 内期望节点未全部恢复即回退。
@@ -147,9 +148,18 @@ const upgradeWatchdogTimeout = 240 * time.Second
 
 // upgradeMarker 换核 pending 标记；Healthy 为升级前处于 running 的节点集，
 // 新版本的看门狗解除条件 = 心跳成功 + 该集合全部恢复运行。
+// install.sh 升级路径写空 Healthy（它不知道节点状态），由 agent 从
+// nodeHealthStateName 的升级前快照继承。
 type upgradeMarker struct {
 	Backup  string `json:"backup"`
 	Healthy []int  `json:"healthy,omitempty"`
+}
+
+// nodeHealthState 心跳成功后落盘的节点健康快照；跨二进制交换持久，
+// 供升级后的新进程还原"升级前哪些节点在跑"。
+type nodeHealthState struct {
+	Healthy  []int64 `json:"healthy"`
+	UnixTime int64   `json:"unix_time"`
 }
 
 func writeUpgradeMarker(dir, backupPath string, healthy []int) error {
@@ -158,6 +168,45 @@ func writeUpgradeMarker(dir, backupPath string, healthy []int) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, upgradeMarkerName), b, 0o600)
+}
+
+// persistNodeHealth 原子落盘健康节点快照（写在二进制同目录，属可写的 INSTALL_ROOT）。
+func persistNodeHealth(ids []int) {
+	live, err := os.Executable()
+	if err != nil {
+		return
+	}
+	path := filepath.Join(filepath.Dir(live), nodeHealthStateName)
+	st := nodeHealthState{UnixTime: time.Now().Unix()}
+	for _, id := range ids {
+		st.Healthy = append(st.Healthy, int64(id))
+	}
+	b, err := json.Marshal(st)
+	if err != nil {
+		return
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, path)
+}
+
+// readNodeHealthSnapshot 读取升级前快照（新进程启动早期调用，此时文件仍是旧进程内容）。
+func readNodeHealthSnapshot(dir string) []int {
+	raw, err := os.ReadFile(filepath.Join(dir, nodeHealthStateName))
+	if err != nil {
+		return nil
+	}
+	var st nodeHealthState
+	if json.Unmarshal(raw, &st) != nil {
+		return nil
+	}
+	ids := make([]int, 0, len(st.Healthy))
+	for _, id := range st.Healthy {
+		ids = append(ids, int(id))
+	}
+	return ids
 }
 
 // ArmUpgradeWatchdog 在进程启动早期调用：若存在换核 pending 标记，布防看门狗。
@@ -211,6 +260,10 @@ func ArmUpgradeWatchdog() (disarm func()) {
 	if marker.Backup == "" {
 		watchdogDisarm = func() {}
 		return watchdogDisarm
+	}
+	if len(watchdogExpected) == 0 {
+		// install.sh 升级路径写的标记不带 Healthy：从升级前的健康快照继承期望集
+		watchdogExpected = readNodeHealthSnapshot(dir)
 	}
 	watchdogArmed.Store(true)
 	backupPath := marker.Backup

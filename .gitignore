@@ -32,3 +32,4 @@ internal/tracker/tracker_bench_test.go
 cmd/xboard-node-bench-compare
 cmd/xboard-node-bench
 .envxbctl-linux-*
+bin/

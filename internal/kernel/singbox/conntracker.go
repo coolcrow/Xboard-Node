@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/buf"
 	singM "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -835,3 +836,9 @@ func (c *trackedPacketConn) UnwrapPacketWriter() (N.PacketWriter, []N.CountFunc)
 func (c *trackedPacketConn) Upstream() any           { return c.PacketConn }
 func (c *trackedPacketConn) ReaderReplaceable() bool { return true }
 func (c *trackedPacketConn) WriterReplaceable() bool { return true }
+
+// RoutedFlow satisfies adapter.ConnectionTracker on sing-box >= 1.14（tun 流
+// 追踪我们不用——返回 nil 由调用方跳过包装）
+func (t *ConnTracker) RoutedFlow(_ context.Context, _ adapter.InboundContext, _ adapter.Rule, _ adapter.Outbound) tun.FlowTracker {
+	return nil
+}

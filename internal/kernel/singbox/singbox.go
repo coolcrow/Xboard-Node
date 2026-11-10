@@ -138,7 +138,7 @@ func (s *SingBox) Capabilities() kernel.Capabilities {
 func (s *SingBox) Protocols() []string {
 	return []string{
 		"vmess", "vless", "trojan", "shadowsocks",
-		"hysteria", "hysteria2", "tuic", "naive", "socks", "http", "anytls", "mieru",
+		"hysteria", "hysteria2", "tuic", "naive", "socks", "http", "anytls",
 	}
 }
 
@@ -224,7 +224,9 @@ func (s *SingBox) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls 
 func recycleOldBox(oldBox *box.Box, oldCancel context.CancelFunc, oldCtx context.Context, oldTracker *ConnTracker) {
 	// Step 1: close listen sockets so no new connections arrive on old ports.
 	if im := service.FromContext[adapter.InboundManager](oldCtx); im != nil {
-		_ = im.Close()
+		if cc, ok := im.(interface{ Close() error }); ok {
+			_ = cc.Close()
+		}
 	}
 
 	// Step 2: drain in-flight connections (best-effort).
@@ -278,12 +280,7 @@ func (s *SingBox) Reload(nodeConfig *model.NodeSpec, users []model.UserSpec, tls
 		return fmt.Errorf("router not available")
 	}
 
-	// Update routing rules
-	if err := router.UpdateRules(opts.Route.Rules, opts.Route.RuleSet); err != nil {
-		nlog.Core().Debug("routing reload failed", "error", err)
-	} else {
-		nlog.Core().Debug("sing-box routing reloaded")
-	}
+	// Routing hot-reload not supported on sing-box v1.14.4 upstream; rules are static per instance.
 
 	nopFactory := singLog.NewNOPFactory()
 
@@ -323,10 +320,6 @@ func (s *SingBox) Reload(nodeConfig *model.NodeSpec, users []model.UserSpec, tls
 					}
 				case adapter.UpdatableInbound[option.AnyTLSUser]:
 					if opts, ok := inb.Options.(*option.AnyTLSInboundOptions); ok {
-						err = v.UpdateUsers(opts.Users)
-					}
-				case adapter.UpdatableInbound[option.MieruUser]:
-					if opts, ok := inb.Options.(*option.MieruInboundOptions); ok {
 						err = v.UpdateUsers(opts.Users)
 					}
 				case adapter.UpdatableInbound[auth.User]:
@@ -400,11 +393,12 @@ func (s *SingBox) stop() {
 	}
 
 	// Step 1: close all listen sockets so no new connections are accepted.
-	// im.Close() sets m.started=false so the subsequent box.Close() call is a no-op
-	// for inbounds (avoids double-close), but box.Close() still tears down routers
-	// and outbounds.
+	// Closing inbounds via duck-typed Close (fork InboundManager) prevents double-close;
+	// box.Close() still tears down routers and outbounds.
 	if im := service.FromContext[adapter.InboundManager](s.ctx); im != nil {
-		_ = im.Close()
+		if cc, ok := im.(interface{ Close() error }); ok {
+			_ = cc.Close()
+		}
 	}
 
 	// Step 2: wait for in-flight connections to drain naturally (best-effort).
@@ -633,10 +627,6 @@ func (s *SingBox) reloadInboundsLocked(users []model.UserSpec) error {
 				}
 			case adapter.UpdatableInbound[option.AnyTLSUser]:
 				if opts, ok := inb.Options.(*option.AnyTLSInboundOptions); ok {
-					err = v.UpdateUsers(opts.Users)
-				}
-			case adapter.UpdatableInbound[option.MieruUser]:
-				if opts, ok := inb.Options.(*option.MieruInboundOptions); ok {
 					err = v.UpdateUsers(opts.Users)
 				}
 			case adapter.UpdatableInbound[auth.User]:
